@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/tests/">
+    <Project Path="tests/Drone.E2E/Drone.E2E.csproj" />
+    <Project Path="tests/Drone.Tests/Drone.Tests.csproj" />
+  </Folder>
+  <Project Path="Drone.Agent/Drone.Agent.csproj" />
+  <Project Path="Drone.Autonomy/Drone.Autonomy.csproj" />
+  <Project Path="Drone.Core/Drone.Core.csproj" />
+  <Project Path="Drone.MCP/Drone.MCP.csproj" />
+  <Project Path="Drone.Native/Drone.Native.csproj" />
+  <Project Path="Drone.Services/Drone.Services.csproj" />
+  <Project Path="Drone.System/Drone.System.csproj" />
+</Solution>

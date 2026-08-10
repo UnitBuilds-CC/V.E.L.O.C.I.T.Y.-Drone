@@ -1,0 +1,9 @@
+﻿[
+  {
+    "Name": "LogAllEvents",
+    "Trigger": "*",
+    "Action": "log",
+    "ActionParams": { "level": "info", "message": "Event received" },
+    "Enabled": true
+  }
+]

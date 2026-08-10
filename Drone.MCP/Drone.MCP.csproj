@@ -1,0 +1,13 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Drone.MCP</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Drone.Core\Drone.Core.csproj" />
+    <ProjectReference Include="..\Drone.System\Drone.System.csproj" />
+    <ProjectReference Include="..\Drone.Services\Drone.Services.csproj" />
+  </ItemGroup>
+</Project>

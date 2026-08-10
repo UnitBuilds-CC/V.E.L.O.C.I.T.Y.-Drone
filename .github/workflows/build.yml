@@ -1,0 +1,43 @@
+﻿name: Build & Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10 Preview
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+          dotnet-quality: "preview"
+
+      - name: Restore
+        run: dotnet restore VelocityDrone.slnx
+
+      - name: Build
+        run: dotnet build VelocityDrone.slnx --no-restore -c Release /p:SkipRust=true
+
+      - name: Test
+        run: dotnet test tests/Drone.Tests/Drone.Tests.csproj --no-build -c Release --verbosity normal
+
+  docker:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t velocity-drone:latest .
