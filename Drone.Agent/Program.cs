@@ -21,7 +21,7 @@ public class Program
 {
     public static async Task Main(string[] args)
     {
-        // â”€â”€ Logging â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // â”€â”€ Logging â”€â”€
         using var loggerFactory = LoggerFactory.Create(builder =>
         {
             builder.AddConsole();
@@ -31,10 +31,11 @@ public class Program
 
         logger.LogInformation("=== Velocity Drone Agent v1.0.0 ===");
         logger.LogInformation("Mode: {Mode}", Environment.GetEnvironmentVariable("DRONE_MODE") ?? "full");
-        logger.LogInformation("Platform: {OS} {Arch}", global::System.Runtime.InteropServices.RuntimeInformation.OSDescription,
+        logger.LogInformation("Platform: {OS} {Arch}",
+            global::System.Runtime.InteropServices.RuntimeInformation.OSDescription,
             global::System.Runtime.InteropServices.RuntimeInformation.OSArchitecture);
 
-        // â”€â”€ Configuration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // â”€â”€ Configuration â”€â”€
         var config = new ConfigurationBuilder()
             .SetBasePath(AppContext.BaseDirectory)
             .AddJsonFile("appsettings.json", optional: true)
@@ -49,7 +50,7 @@ public class Program
 
         if (Environment.GetEnvironmentVariable("DRONE_ID") is string id) droneConfig.DroneId = id;
 
-        // â”€â”€ System Modules â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // â”€â”€ System Modules â”€â”€
         IScreenCapture? screen = null;
         IInputSimulator? input = null;
         IWindowManager? windows = null;
@@ -73,7 +74,7 @@ public class Program
         var process = PlatformFactory.CreateProcessManager(logger);
         var clipboard = PlatformFactory.CreateClipboardManager(logger);
 
-        // â”€â”€ Service Connectors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // â”€â”€ Service Connectors â”€â”€
         MessengerConnector? messenger = null;
         ShareConnector? share = null;
         RemoteConnector? remote = null;
@@ -95,7 +96,7 @@ public class Program
             _ = Task.Run(() => remote.ConnectAsync());
         }
 
-        // â”€â”€ Autonomy Engine â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // â”€â”€ Autonomy Engine â”€â”€
         var eventBus = new EventBus();
         var autonomy = new AutonomyEngine(droneConfig.Autonomy, logger);
 
@@ -104,7 +105,7 @@ public class Program
         {
             messenger.OnMessageReceived += async (from, content, msgId) =>
             {
-                await eventBus.PublishAsync(new DroneEvent("MessageReceived",
+                await eventBus.PublishAsync(new DroneEvent(DroneEventTypes.MessageReceived,
                     new { from, content, messageId = msgId }));
             };
         }
@@ -113,27 +114,61 @@ public class Program
         {
             share.OnFileChanged += async (path, changeType) =>
             {
-                await eventBus.PublishAsync(new DroneEvent("FileChanged",
+                await eventBus.PublishAsync(new DroneEvent(DroneEventTypes.FileChanged,
                     new { path, changeType }));
             };
         }
 
+        // Wire autonomy action output to service connectors
+        autonomy.OnActionExecuted += async (ruleName, eventType, data) =>
+        {
+            // Auto-reply: send response via Messenger
+            if (eventType == DroneEventTypes.MessageReceived && messenger != null)
+            {
+                // Find auto_reply rules that matched
+                // The actual reply logic is handled by ActionHandlers.AutoReplyAction
+            }
+
+            // Notify AI: send event via uplink
+            if (OnUplinkSend != null)
+            {
+                var notification = global::System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    jsonrpc = "2.0",
+                    method = "notifications/droneEvent",
+                    @params = new { eventType, data, ruleName }
+                });
+                await OnUplinkSend(notification);
+            }
+        };
+
         await autonomy.StartAsync(eventBus);
 
-        // â”€â”€ MCP Tool Server â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // â”€â”€ MCP Tool Server â”€â”€
         var mcpServer = new McpServer(logger);
-        SystemToolRegistrar.RegisterAll(mcpServer, screen, input, process, clipboard, windows, messenger, share, logger);
+        SystemToolRegistrar.RegisterAll(mcpServer, screen, input, process, clipboard, windows, messenger, share, remote, logger);
 
-        logger.LogInformation("Starting MCP server (stdio mode)...");
+        // Determine MCP transport mode
+        var mcpMode = Environment.GetEnvironmentVariable("DRONE_MCP_MODE") ?? "stdio";
+        logger.LogInformation("Starting MCP server ({Mode} mode)...", mcpMode);
         logger.LogInformation("Registered {Count} tools", mcpServer.GetToolList().Length);
 
-        // â”€â”€ Run â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // â”€â”€ Run â”€â”€
         var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
         try
         {
-            await mcpServer.RunStdioAsync(cts.Token);
+            if (mcpMode == "shmem")
+            {
+                var bufferPath = droneConfig.Uplink.BufferPath;
+                var bufferSize = droneConfig.Uplink.BufferSize;
+                await mcpServer.RunShmemAsync(bufferPath, bufferSize, cts.Token);
+            }
+            else
+            {
+                await mcpServer.RunStdioAsync(cts.Token);
+            }
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -150,6 +185,9 @@ public class Program
             await mcpServer.DisposeAsync();
         }
     }
+
+    // Uplink send callback (set when VelocityConnection is active)
+    private static Func<string, Task>? OnUplinkSend;
 }
 
 /// <summary>Adapter to bridge Microsoft.Extensions.Logging to Drone.Core.ILogger.</summary>

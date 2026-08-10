@@ -8,6 +8,6 @@ public class BehaviorRule
     public Dictionary<string, string> ActionParams { get; set; } = new();
     public string? Condition { get; set; }
     public bool Enabled { get; set; } = true;
+
     public bool MatchesCondition(DroneEvent evt) => Trigger == "*" || Trigger == evt.Type;
-    public Task ExecuteAction(DroneEvent evt) => Task.CompletedTask;
 }

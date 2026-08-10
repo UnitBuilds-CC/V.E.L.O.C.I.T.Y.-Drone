@@ -19,6 +19,7 @@ public class MessengerConnector : IAsyncDisposable
     public event Func<string, string, string, Task>? OnMediaReceived;
     public event Func<string, JsonElement, Task>? OnCallSignal;
     public event Func<bool, Task>? OnConnectionChanged;
+    public event Func<JsonElement, Task>? OnControlResponse;
 
     public bool IsConnected => _connected;
 
@@ -77,9 +78,25 @@ public class MessengerConnector : IAsyncDisposable
         return fileName;
     }
 
+    public async Task DownloadMediaAsync(string url, string localPath, CancellationToken ct = default)
+    {
+        using var http = new HttpClient();
+        var data = await http.GetByteArrayAsync(url, ct);
+        var dir = Path.GetDirectoryName(localPath);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+        await File.WriteAllBytesAsync(localPath, data, ct);
+        _logger.LogInformation("Downloaded media to " + localPath);
+    }
+
     public async Task SendCallSignalAsync(string to, string signalType, object payload, CancellationToken ct = default)
     {
         var msg = JsonSerializer.Serialize(new { type = "call_signal", to, signalType, payload });
+        await SendAsync(msg, ct);
+    }
+
+    public async Task SendControlMessageAsync(string command, string payload, CancellationToken ct = default)
+    {
+        var msg = JsonSerializer.Serialize(new { type = "control", command, payload });
         await SendAsync(msg, ct);
     }
 
@@ -97,7 +114,12 @@ public class MessengerConnector : IAsyncDisposable
         {
             ms.SetLength(0);
             WebSocketReceiveResult result;
-            do { result = await _ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct); if (result.MessageType == WebSocketMessageType.Close) return; ms.Write(buffer, 0, result.Count); } while (!result.EndOfMessage);
+            do
+            {
+                result = await _ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
+                if (result.MessageType == WebSocketMessageType.Close) return;
+                ms.Write(buffer, 0, result.Count);
+            } while (!result.EndOfMessage);
             var json = Encoding.UTF8.GetString(ms.ToArray());
             try
             {
@@ -107,13 +129,28 @@ public class MessengerConnector : IAsyncDisposable
                 switch (msgType)
                 {
                     case "message":
-                        if (OnMessageReceived != null) await OnMessageReceived(root.GetProperty("from").GetString() ?? "", root.GetProperty("content").GetString() ?? "", root.TryGetProperty("id", out var id) ? id.GetString() ?? "" : "");
+                        if (OnMessageReceived != null)
+                            await OnMessageReceived(
+                                root.GetProperty("from").GetString() ?? "",
+                                root.GetProperty("content").GetString() ?? "",
+                                root.TryGetProperty("id", out var id) ? id.GetString() ?? "" : "");
                         break;
                     case "media":
-                        if (OnMediaReceived != null) await OnMediaReceived(root.GetProperty("from").GetString() ?? "", root.GetProperty("url").GetString() ?? "", root.TryGetProperty("mediaType", out var mt) ? mt.GetString() ?? "" : "");
+                        if (OnMediaReceived != null)
+                            await OnMediaReceived(
+                                root.GetProperty("from").GetString() ?? "",
+                                root.GetProperty("url").GetString() ?? "",
+                                root.TryGetProperty("mediaType", out var mt) ? mt.GetString() ?? "" : "");
                         break;
                     case "call_signal":
-                        if (OnCallSignal != null) await OnCallSignal(root.GetProperty("from").GetString() ?? "", root.GetProperty("payload"));
+                        if (OnCallSignal != null)
+                            await OnCallSignal(
+                                root.GetProperty("from").GetString() ?? "",
+                                root.GetProperty("payload"));
+                        break;
+                    case "control_response":
+                        if (OnControlResponse != null)
+                            await OnControlResponse(root);
                         break;
                 }
             }
@@ -124,7 +161,12 @@ public class MessengerConnector : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _cts?.Cancel();
-        if (_ws?.State == WebSocketState.Open) { try { await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Disposing", CancellationToken.None); } catch { } }
-        _ws?.Dispose(); _cts?.Dispose();
+        if (_ws?.State == WebSocketState.Open)
+        {
+            try { await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Disposing", CancellationToken.None); }
+            catch { }
+        }
+        _ws?.Dispose();
+        _cts?.Dispose();
     }
 }
