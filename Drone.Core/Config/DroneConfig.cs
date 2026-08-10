@@ -103,4 +103,10 @@ public class AutonomyConfig
 
     /// <summary>System metrics collection interval in seconds (0 = disabled).</summary>
     public int SystemMetricsIntervalSec { get; set; } = 30;
+
+    /// <summary>Process monitor interval in seconds (0 = disabled).</summary>
+    public int ProcessMonitorIntervalSec { get; set; } = 10;
+
+    /// <summary>Scheduled task poll interval in seconds (0 = disabled).</summary>
+    public int ScheduledTaskPollSec { get; set; } = 60;
 }
