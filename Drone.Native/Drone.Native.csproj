@@ -1,0 +1,16 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Drone.Native</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Drone.Core\Drone.Core.csproj" />
+  </ItemGroup>
+  <!-- Rust build is optional â€” the .NET fallbacks work without it -->
+  <Target Name="BuildRust" BeforeTargets="Build" Condition="'$(SkipRust)' != 'true' AND Exists('Cargo.toml')">
+    <Exec Command="cargo build --release" WorkingDirectory="$(MSBuildProjectDirectory)" IgnoreExitCode="true" />
+  </Target>
+</Project>

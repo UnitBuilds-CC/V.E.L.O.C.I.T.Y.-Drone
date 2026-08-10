@@ -1,0 +1,31 @@
+﻿## .NET
+bin/
+obj/
+*.user
+*.suo
+*.cache
+.vs/
+
+## Rust
+Drone.Native/target/
+
+## Build artifacts
+publish/
+*.nupkg
+
+## IDE
+.idea/
+*.swp
+*~
+
+## OS
+.DS_Store
+Thumbs.db
+
+## Secrets
+*.env
+appsettings.Production.json
+config/secrets.json
+
+## Node
+node_modules/

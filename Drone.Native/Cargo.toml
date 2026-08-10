@@ -1,0 +1,19 @@
+﻿[package]
+name = "drone-native"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "drone_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Zero-copy NMCP frame parsing
+bytemuck = { version = "1", features = ["derive"] }
+
+# Fast screen diff (pixel comparison)
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Serialization for FFI boundary
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
