@@ -242,14 +242,21 @@ async fn main() -> anyhow::Result<()> {
         // Set message handler (command processor)
         let msg_clone = msg.clone();
         let mcp = mcp_server.clone_ref_public();
-        msg.set_on_message(move |from, content, _msg_id| {
+        let eb = event_bus.clone();
+        msg.set_on_message(move |from, content, msg_id| {
             let msg = msg_clone.clone();
             let mcp = mcp.clone();
+            let eb = eb.clone();
             Box::pin(async move {
                 if from.is_empty() || !msg.is_connected() { return; }
                 let cmd = content.trim().to_string();
                 let response = handle_messenger_command(&cmd, &from, &mcp, &msg).await;
                 let _ = msg.send_message(&from, &response).await;
+                // Publish message received event to autonomy event bus
+                let _ = eb.publish(drone_autonomy::event_bus::DroneEvent {
+                    event_type: DroneEventTypes::MESSAGE_RECEIVED.to_string(),
+                    data: serde_json::json!({"from": from, "content": content, "messageId": msg_id}),
+                }).await;
             })
         }).await;
 
