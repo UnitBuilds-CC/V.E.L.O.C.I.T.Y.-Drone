@@ -12,6 +12,10 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 anyhow = { workspace = true }
+sysinfo = "0.33"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["winuser", "wingdi", "windef", "wingdi", "processthreadsapi", "errhandlingapi"] }
+winapi = { version = "0.3", features = [
+    "winuser", "wingdi", "windef", "processthreadsapi",
+    "errhandlingapi", "stringapiset", "winbase", "ntdef",
+] }
