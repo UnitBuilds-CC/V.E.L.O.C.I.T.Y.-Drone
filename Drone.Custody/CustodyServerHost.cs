@@ -15,6 +15,7 @@ namespace Drone.Custody;
 public class CustodyServerHost : IAsyncDisposable
 {
     private readonly CustodyLogStore _store;
+    private readonly CustodyQueryEngine _queryEngine;
     private readonly ILogger _logger;
     private HttpListener? _listener;
     private CancellationTokenSource? _cts;
@@ -31,8 +32,12 @@ public class CustodyServerHost : IAsyncDisposable
     public CustodyServerHost(CustodyLogStore store, ILogger logger)
     {
         _store = store;
+        _queryEngine = new CustodyQueryEngine(store);
         _logger = logger;
     }
+
+    /// <summary>The query engine for programmatic access to custody data.</summary>
+    public CustodyQueryEngine QueryEngine => _queryEngine;
 
     /// <summary>Total records stored.</summary>
     public int TotalRecords => _store.TotalRecords;
@@ -249,37 +254,12 @@ public class CustodyServerHost : IAsyncDisposable
             var fromStr = query["from"];
             var toStr = query["to"];
 
-            CustodyRecord[] results;
+            DateTime? from = null, to = null;
+            if (!string.IsNullOrEmpty(fromStr) && DateTime.TryParse(fromStr, out var f)) from = f;
+            if (!string.IsNullOrEmpty(toStr) && DateTime.TryParse(toStr, out var t)) to = t;
 
-            if (!string.IsNullOrEmpty(correlationId))
-            {
-                results = _store.GetRecordsByCorrelation(correlationId);
-            }
-            else if (!string.IsNullOrEmpty(droneId))
-            {
-                results = _store.GetDroneRecords(droneId);
-
-                // Apply time filter if provided
-                if (!string.IsNullOrEmpty(fromStr) && DateTime.TryParse(fromStr, out var from))
-                    results = results.Where(r => r.Timestamp >= from).ToArray();
-                if (!string.IsNullOrEmpty(toStr) && DateTime.TryParse(toStr, out var to))
-                    results = results.Where(r => r.Timestamp <= to).ToArray();
-            }
-            else if (!string.IsNullOrEmpty(eventType))
-            {
-                results = _store.GetRecordsByEventType(eventType);
-            }
-            else if (!string.IsNullOrEmpty(fromStr) && !string.IsNullOrEmpty(toStr)
-                && DateTime.TryParse(fromStr, out var from2) && DateTime.TryParse(toStr, out var to2))
-            {
-                results = _store.GetRecordsByTimeRange(from2, to2);
-            }
-            else
-            {
-                // Return merged timeline (last 100 records)
-                var all = _store.GetMergedTimeline();
-                results = all.Skip(Math.Max(0, all.Length - 100)).ToArray();
-            }
+            // Delegate to CustodyQueryEngine
+            var results = _queryEngine.Query(droneId, from, to, correlationId, eventType);
 
             var json = JsonSerializer.Serialize(new
             {
@@ -305,13 +285,14 @@ public class CustodyServerHost : IAsyncDisposable
 
     private void HandleHealthCheck(HttpListenerContext context)
     {
+        var summary = _queryEngine.GetSummary();
         var health = JsonSerializer.Serialize(new
         {
             status = "healthy",
-            totalRecords = _store.TotalRecords,
-            droneCount = _store.DroneCount,
+            totalRecords = summary.TotalRecords,
+            droneCount = summary.DroneCount,
             streamClients = StreamClientCount,
-            droneIds = _store.GetDroneIds()
+            droneIds = summary.DroneIds
         });
         var bytes = Encoding.UTF8.GetBytes(health);
         context.Response.StatusCode = 200;
