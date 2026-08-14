@@ -242,7 +242,7 @@ public class McpServer : IAsyncDisposable
         catch (Exception ex) when (url.Contains("+") || url.Contains("0.0.0.0"))
         {
             // On Windows, HttpListener requires admin for 0.0.0.0 — fall back to localhost
-            _logger.LogWarning("Cannot bind to all interfaces. Falling back to localhost...");
+            _logger.LogWarning("Cannot bind to all interfaces: {Error}. Falling back to localhost...", ex.Message);
             _wsListener.Close();
             listenUrl = url.Replace("+", "localhost").Replace("0.0.0.0", "localhost");
             _wsListener = new HttpListener();

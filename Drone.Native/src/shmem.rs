@@ -19,7 +19,7 @@ pub const RES_LEN_OFFSET: usize = 4101;
 pub const RES_PAYLOAD_OFFSET: usize = 4105;
 pub const RES_PAYLOAD_SIZE: usize = SHMEM_TOTAL_SIZE - RES_PAYLOAD_OFFSET;
 
-// State machine
+// State machine — 5-state protocol for lock-free shmem IPC
 pub const STATE_IDLE: u8 = 0;
 pub const STATE_REQ_READY: u8 = 1;
 pub const STATE_PROCESSING: u8 = 2;
@@ -28,6 +28,7 @@ pub const STATE_ERROR: u8 = 4;
 
 /// Read a request from shared memory.
 /// Returns 0 on success (request available), -1 if no request ready, -2 on error.
+/// On success, transitions the request channel to STATE_PROCESSING.
 /// The caller must provide a buffer of at least `max_payload_len` bytes.
 #[no_mangle]
 pub extern "C" fn nmcp_shmem_read_request(
@@ -69,6 +70,9 @@ pub extern "C" fn nmcp_shmem_read_request(
         let payload_len = i32::from_le_bytes(len_buf) as usize;
 
         if payload_len == 0 || payload_len > REQ_PAYLOAD_SIZE || payload_len > max_payload_len {
+            // Signal error on the request channel
+            let _ = file.seek(SeekFrom::Start(REQ_STATE_OFFSET as u64));
+            let _ = file.write_all(&[STATE_ERROR]);
             return -2;
         }
 
@@ -77,13 +81,17 @@ pub extern "C" fn nmcp_shmem_read_request(
         if file.seek(SeekFrom::Start(REQ_PAYLOAD_OFFSET as u64)).is_err() { return -2; }
         if file.read_exact(payload_out).is_err() { return -2; }
 
+        // Transition request channel to PROCESSING (we're handling it)
+        if file.seek(SeekFrom::Start(REQ_STATE_OFFSET as u64)).is_err() { return -2; }
+        if file.write_all(&[STATE_PROCESSING]).is_err() { return -2; }
+
         *out_payload_len = payload_len as i32;
         0
     }
 }
 
 /// Write a response to shared memory and signal RES_READY.
-/// Returns 0 on success, -1 on error.
+/// Returns 0 on success, -1 on error (also writes STATE_ERROR to response channel).
 #[no_mangle]
 pub extern "C" fn nmcp_shmem_write_response(
     buffer_path: *const u8,
@@ -105,19 +113,38 @@ pub extern "C" fn nmcp_shmem_write_response(
 
         let len = payload_len as usize;
         if len > RES_PAYLOAD_SIZE {
+            // Signal error on the response channel
+            let _ = file.seek(SeekFrom::Start(RES_STATE_OFFSET as u64));
+            let _ = file.write_all(&[STATE_ERROR]);
             return -1;
         }
 
         // Write payload length
         let len_bytes = (payload_len as i32).to_le_bytes();
-        if file.seek(SeekFrom::Start(RES_LEN_OFFSET as u64)).is_err() { return -1; }
-        if file.write_all(&len_bytes).is_err() { return -1; }
+        if file.seek(SeekFrom::Start(RES_LEN_OFFSET as u64)).is_err() {
+            let _ = file.seek(SeekFrom::Start(RES_STATE_OFFSET as u64));
+            let _ = file.write_all(&[STATE_ERROR]);
+            return -1;
+        }
+        if file.write_all(&len_bytes).is_err() {
+            let _ = file.seek(SeekFrom::Start(RES_STATE_OFFSET as u64));
+            let _ = file.write_all(&[STATE_ERROR]);
+            return -1;
+        }
 
         // Write payload
         if len > 0 {
             let payload_data = std::slice::from_raw_parts(payload, len);
-            if file.seek(SeekFrom::Start(RES_PAYLOAD_OFFSET as u64)).is_err() { return -1; }
-            if file.write_all(payload_data).is_err() { return -1; }
+            if file.seek(SeekFrom::Start(RES_PAYLOAD_OFFSET as u64)).is_err() {
+                let _ = file.seek(SeekFrom::Start(RES_STATE_OFFSET as u64));
+                let _ = file.write_all(&[STATE_ERROR]);
+                return -1;
+            }
+            if file.write_all(payload_data).is_err() {
+                let _ = file.seek(SeekFrom::Start(RES_STATE_OFFSET as u64));
+                let _ = file.write_all(&[STATE_ERROR]);
+                return -1;
+            }
         }
 
         // Signal RES_READY
