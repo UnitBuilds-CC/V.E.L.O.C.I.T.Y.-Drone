@@ -71,6 +71,8 @@ public static class NmcpFrameTypes
     public const uint CustodyQuery = 41;
     public const uint CustodyTimeline = 42;
     public const uint CustodyStream = 43;
+    /// <summary>NMCP Merkle-signed binary custody batch. Payload is binary-serialized records with Merkle root.</summary>
+    public const uint CustodyBinary = 44;
 
     public const uint Heartbeat = 100;
     public const uint Handshake = 101;

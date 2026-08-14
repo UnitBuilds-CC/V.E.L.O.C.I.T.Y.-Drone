@@ -1,13 +1,18 @@
-﻿//! Drone Native â€” Rust FFI for performance-critical paths.
+//! Drone Native — Rust FFI for performance-critical paths.
 //! 
 //! Provides:
 //! - NMCP binary frame parser (zero-copy, ~1.5ns per frame)
+//! - NMCP Merkle frame parser (Merkle-signed frames, O(log N) verification)
+//! - Shared memory IPC (atomic state machine, 100μs polling)
 //! - Screen diff engine (pixel-level comparison for change detection)
-//! - Future: crypto operations for NDA document handling
 
 use std::slice;
 
-/// NMCP frame header â€” 16 bytes, matches the C# NmcpFrame struct layout.
+// New modules for NMCP Merkle protocol
+mod nmcp_merkle;
+mod shmem;
+
+/// NMCP frame header — 16 bytes, matches the C# NmcpFrame struct layout.
 #[repr(C)]
 pub struct NmcpFrameHeader {
     pub magic: u32,        // 0x564E4D43 ("VNMC")

@@ -7,6 +7,7 @@ namespace Drone.Core.Custody;
 /// Custody-aware audit logger. Wraps CustodyChain to produce hash-chained records,
 /// writes them to local JSON-lines file (offline resilience), and maintains an
 /// in-memory ring buffer for streaming to the CustodyServer.
+/// Supports Merkle batch roots for O(log N) verification.
 /// </summary>
 public class CustodyAuditLogger : IDisposable
 {
@@ -29,8 +30,18 @@ public class CustodyAuditLogger : IDisposable
     /// <summary>Default ring buffer size.</summary>
     private const int DefaultRingBufferSize = 1000;
 
+    /// <summary>Pending batch for Merkle root assignment.</summary>
+    private readonly List<CustodyRecord> _pendingBatch = new();
+    private readonly object _batchLock = new();
+
+    /// <summary>Maximum records in a pending batch before auto-flush.</summary>
+    private const int MaxPendingBatchSize = 50;
+
     /// <summary>Event fired when a new custody record is created. Used by CustodyReporter.</summary>
     public event Action<CustodyRecord>? OnRecordCreated;
+
+    /// <summary>Event fired when a batch is flushed with Merkle root assigned. Used by CustodyReporter for binary streaming.</summary>
+    public event Action<CustodyRecord[], string>? OnBatchFlushed;
 
     /// <summary>Create a custody audit logger.</summary>
     /// <param name="droneId">Identity of this drone agent.</param>
@@ -63,6 +74,9 @@ public class CustodyAuditLogger : IDisposable
 
     /// <summary>The underlying hash chain.</summary>
     public CustodyChain Chain => _chain;
+
+    /// <summary>Number of records in the pending batch (not yet assigned a Merkle root).</summary>
+    public int PendingBatchCount { get { lock (_batchLock) return _pendingBatch.Count; } }
 
     /// <summary>Log a tool call event.</summary>
     public CustodyRecord LogToolCall(string action, string? arguments = null, string? result = null,
@@ -117,6 +131,34 @@ public class CustodyAuditLogger : IDisposable
     }
 
     /// <summary>
+    /// Flush the pending batch: compute Merkle root over all pending records,
+    /// assign it to each record, rewrite them to the log file with the root,
+    /// and fire the OnBatchFlushed event.
+    /// </summary>
+    /// <returns>The Merkle root assigned (hex), or empty if no pending records.</returns>
+    public string FlushBatchWithMerkleRoot()
+    {
+        CustodyRecord[] batch;
+        lock (_batchLock)
+        {
+            if (_pendingBatch.Count == 0) return "";
+            batch = _pendingBatch.ToArray();
+            _pendingBatch.Clear();
+        }
+
+        // Compute and assign Merkle root
+        var root = CustodyChain.AssignBatchMerkleRoot(batch);
+
+        // Rewrite records to file with MerkleRoot set
+        WriteBatchToFile(batch);
+
+        // Notify listeners (CustodyReporter uses this for binary streaming)
+        OnBatchFlushed?.Invoke(batch, root);
+
+        return root;
+    }
+
+    /// <summary>
     /// Get recent records from the ring buffer (newest first).
     /// Used by CustodyReporter to stream records to the server.
     /// </summary>
@@ -153,8 +195,13 @@ public class CustodyAuditLogger : IDisposable
 
     private void EmitRecord(CustodyRecord record)
     {
-        // Write to local file
-        WriteToFile(record);
+        // Add to pending batch for Merkle root assignment
+        bool shouldFlush = false;
+        lock (_batchLock)
+        {
+            _pendingBatch.Add(record);
+            shouldFlush = _pendingBatch.Count >= MaxPendingBatchSize;
+        }
 
         // Add to ring buffer
         lock (_ringLock)
@@ -164,11 +211,15 @@ public class CustodyAuditLogger : IDisposable
             if (_ringCount < _ringBuffer.Length) _ringCount++;
         }
 
-        // Notify listeners
+        // Notify listeners (record created, before Merkle root assigned)
         OnRecordCreated?.Invoke(record);
+
+        // Auto-flush if batch is full
+        if (shouldFlush)
+            FlushBatchWithMerkleRoot();
     }
 
-    private void WriteToFile(CustodyRecord record)
+    private void WriteBatchToFile(CustodyRecord[] batch)
     {
         if (_disposed || string.IsNullOrEmpty(_logPath)) return;
         lock (_lock)
@@ -176,7 +227,10 @@ public class CustodyAuditLogger : IDisposable
             try
             {
                 EnsureWriter();
-                _writer?.WriteLine(record.ToJson());
+                foreach (var record in batch)
+                {
+                    _writer?.WriteLine(record.ToJson());
+                }
                 _writer?.Flush();
             }
             catch { /* custody write failure must not crash the agent */ }
@@ -294,6 +348,10 @@ public class CustodyAuditLogger : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+
+        // Flush any remaining pending batch
+        FlushBatchWithMerkleRoot();
+
         lock (_lock)
         {
             _writer?.Dispose();
