@@ -1,4 +1,4 @@
-﻿name: Deploy to Azure
+name: Deploy to Azure
 
 on:
   workflow_dispatch:
@@ -11,6 +11,7 @@ on:
       - "Drone.Services/**"
       - "Drone.MCP/**"
       - "Drone.Autonomy/**"
+      - "Drone.Custody/**"
       - "Dockerfile"
 
 jobs:
