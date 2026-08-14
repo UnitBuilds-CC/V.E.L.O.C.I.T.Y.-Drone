@@ -1,6 +1,23 @@
 # Velocity Drone
 
-Autonomous agent for remote system management. Runs as a background tray agent on any Windows machine, exposing tools via MCP (Model Context Protocol) over NMCP binary frames. Controlled remotely via Messenger commands, WebSocket uplink, or direct NMCP tool calls.
+Autonomous agent for remote system management. Runs as a background tray agent on any Windows machine (or headless via Docker), exposing tools via MCP (Model Context Protocol) over the NMCP binary protocol. Controlled remotely via Messenger commands, WebSocket uplink, or direct NMCP tool calls.
+
+## Quick Start
+
+```bash
+# Build
+dotnet build VelocityDrone.slnx /p:SkipRust=true
+
+# Test (52 unit tests + 10 E2E)
+dotnet test tests/Drone.Tests/Drone.Tests.csproj
+dotnet run --project tests/Drone.E2E/Drone.E2E.csproj
+
+# Run agent (Windows)
+dotnet run --project Drone.Agent/Drone.Agent.csproj
+
+# Run custody server
+dotnet run --project Drone.Custody/Drone.Custody.csproj
+```
 
 ## Architecture
 
@@ -26,6 +43,8 @@ Autonomous agent for remote system management. Runs as a background tray agent o
 └─────────────────────────────────────────────────────────────┘
 ```
 
+See [Architecture](docs/architecture.md) for the full module map, dependency graph, data flow diagrams, and threading model.
+
 ## Projects
 
 | Project | Description |
@@ -34,7 +53,7 @@ Autonomous agent for remote system management. Runs as a background tray agent o
 | **Drone.Core** | Shared types: `ILogger`, `DroneConfig`, `EventBus`, NMCP binary frame protocol, custody trail primitives. |
 | **Drone.Services** | Connectors: `MessengerConnector`, `RemoteConnector`, `ShareConnector`, `CustodyReporter`, `DeltaScreenPipeline`. |
 | **Drone.MCP** | MCP server: tool registration, JSON-RPC 2.0, WebSocket transport, NMCP buffer management. |
-| **Drone.System** | Platform abstractions: `IScreenCapture`, `IInputSimulator`, `IWindowManager`, `IProcessManager`. Windows/Linux/macOS implementations. |
+| **Drone.System** | Platform abstractions: `IScreenCapture`, `IInputSimulator`, `IWindowManager`, `IProcessManager`. Windows/Linux/macOS. |
 | **Drone.Autonomy** | Rule engine: `BehaviorRule` triggers + `ActionHandler` responses. `EventBus`-driven autonomous behavior. |
 | **Drone.Native** | Rust FFI bindings: delta frame serialization, WebP compression, native performance-critical paths. |
 | **Drone.Custody** | Standalone custody server: WebSocket ingestion, hash-chain validation, HTTP query API, real-time stream broadcast. |
@@ -44,9 +63,7 @@ Autonomous agent for remote system management. Runs as a background tray agent o
 
 ## Custody Trail
 
-Every action the agent takes is recorded in a tamper-evident, hash-chained audit trail. Records are produced locally (offline-resilient) and streamed in real-time to a central CustodyServer.
-
-### How it works
+Every action the agent takes is recorded in a **tamper-evident, hash-chained audit trail**. Records are produced locally (offline-resilient) and streamed in real-time to a central CustodyServer.
 
 ```
 Drone (local)                              CustodyServer (central)
@@ -77,6 +94,8 @@ Drone (local)                              CustodyServer (central)
 | `CustodyServerHost` | Custody | WebSocket server: receives reports, validates chains, HTTP query, stream broadcast |
 | `CustodyQueryEngine` | Custody | Query by drone, time range, correlation ID, event type. Verified trail retrieval |
 
+See [Custody Trail Reference](docs/custody-trail.md) for the complete architecture, API reference, field specifications, and security considerations.
+
 ### NMCP Frame Types
 
 | Type | Code | Direction | Purpose |
@@ -85,6 +104,8 @@ Drone (local)                              CustodyServer (central)
 | `CustodyQuery` | 41 | Drone → Server | Query request (drone, time, correlation, event) |
 | `CustodyTimeline` | 42 | Server → Client | Query response with ordered records |
 | `CustodyStream` | 43 | Server → Clients | Real-time broadcast of new records |
+
+See [NMCP Protocol Specification](docs/nmcp-protocol.md) for the full wire format, frame type registry, and connection lifecycle.
 
 ### CustodyServer API
 
@@ -95,15 +116,6 @@ GET /health
 ```
 
 **WebSocket:** Connect to receive real-time custody events. Server validates hash chains on receipt and rejects broken chains.
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DRONE_CUSTODY_PATH` | `./custody/drone-custody.jsonl` | Local custody log file path |
-| `DRONE_CUSTODY_SERVER` | _(none)_ | CustodyServer URL for streaming |
-| `CUSTODY_STORAGE_PATH` | `./custody-data` | Server-side storage directory |
-| `CUSTODY_LISTEN_URL` | `http://+:5010/` | CustodyServer listen URL |
 
 ## Configuration
 
@@ -131,7 +143,12 @@ Edit `Drone.Agent/appsettings.json` or set environment variables:
 | `DRONE_WS_URL` | Uplink WebSocket URL |
 | `DRONE_MCP_URL` | MCP WebSocket listen URL (default `http://+:9100`) |
 | `DRONE_MCP_TOKEN` | MCP auth token |
-| `DRONE_SHARE_PATH` | Shared files storage path |
+| `DRONE_CUSTODY_PATH` | Local custody log file path |
+| `DRONE_CUSTODY_SERVER` | CustodyServer URL for streaming |
+| `CUSTODY_STORAGE_PATH` | Server-side storage directory |
+| `CUSTODY_LISTEN_URL` | CustodyServer listen URL |
+
+See [Configuration Reference](docs/configuration.md) for every setting, defaults, and Docker environment.
 
 ## Messenger Commands
 
@@ -157,11 +174,11 @@ Requires .NET 10 preview SDK.
 
 ```bash
 # Build all projects
-dotnet build Drone.Agent/Drone.Agent.csproj
-dotnet build Drone.Custody/Drone.Custody.csproj
+dotnet build VelocityDrone.slnx /p:SkipRust=true
 
 # Build specific module
 dotnet build Drone.Core/Drone.Core.csproj
+dotnet build Drone.Custody/Drone.Custody.csproj
 ```
 
 ## Testing
@@ -188,30 +205,32 @@ dotnet run --project tests/Drone.E2E/Drone.E2E.csproj
 | `EventBusTests` | 4 | Pub/sub, filtering, error isolation |
 | `E2E Tests` | 10 | MCP handshake, tool calls, WebSocket transport, auth, custody trail |
 
-## Running the CustodyServer
+## Deployment
 
 ```bash
-# Default: listens on http://+:5010/, stores in ./custody-data/
+# Docker (headless, for cloud VMs)
+docker build -t velocity-drone:latest .
+docker run -d -e DRONE_MODE=headless -e DRONE_MCP_TOKEN=secret -p 9100:9100 velocity-drone
+
+# Windows tray app
+dotnet publish Drone.Agent/Drone.Agent.csproj -c Release -o ./publish
+
+# CustodyServer
 dotnet run --project Drone.Custody/Drone.Custody.csproj
-
-# Custom configuration
-CUSTODY_LISTEN_URL=http://localhost:5010/ CUSTODY_STORAGE_PATH=/var/custody dotnet run --project Drone.Custody/Drone.Custody.csproj
 ```
 
-Query the server:
-```bash
-# Health check
-curl http://localhost:5010/health
+See [Deployment Guide](docs/deployment.md) for Docker Compose, systemd, Azure deployment, and network requirements.
 
-# Query by drone
-curl "http://localhost:5010/custody?drone=my-drone"
+## Documentation
 
-# Query by correlation ID
-curl "http://localhost:5010/custody?correlation=corr-abc123"
-
-# Query by time range
-curl "http://localhost:5010/custody?from=2026-01-01T00:00:00Z&to=2026-12-31T23:59:59Z"
-```
+| Document | Description |
+|----------|-------------|
+| [Architecture](docs/architecture.md) | Module map, dependency graph, data flow, threading model |
+| [Custody Trail](docs/custody-trail.md) | Full custody system architecture, API reference, security |
+| [NMCP Protocol](docs/nmcp-protocol.md) | Wire format specification, frame types, connection lifecycle |
+| [Configuration](docs/configuration.md) | Every setting, defaults, environment variables |
+| [Deployment](docs/deployment.md) | Docker, Windows, CustodyServer, Azure, systemd |
+| [Development](docs/development.md) | Building, testing, conventions, debugging, adding tools |
 
 ## Project Structure
 
@@ -251,5 +270,12 @@ Velocity-Drone/
 ├── tests/
 │   ├── Drone.Tests/        # 52 xUnit tests
 │   └── Drone.E2E/          # E2E integration tests
+├── docs/                   # Documentation
+│   ├── architecture.md
+│   ├── custody-trail.md
+│   ├── nmcp-protocol.md
+│   ├── configuration.md
+│   ├── deployment.md
+│   └── development.md
 └── DeltaBench/             # Delta frame benchmarks
 ```
