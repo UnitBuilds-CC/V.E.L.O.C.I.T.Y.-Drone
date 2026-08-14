@@ -13,6 +13,7 @@ use drone_services::share::ShareConnector;
 use drone_services::remote::RemoteConnector;
 use drone_services::file_server::FileServer;
 use drone_services::custody_reporter::CustodyReporter;
+use drone_services::uplink::VelocityConnection;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -125,24 +126,55 @@ async fn main() -> anyhow::Result<()> {
         &messenger, &share, &remote,
     ).await;
 
+    // ── Uplink (VelocityConnection) ──────────────────────────────────────
+    let uplink = if config.uplink.websocket_url.is_some() {
+        Some(Arc::new(VelocityConnection::new(config.uplink.clone())))
+    } else { None };
+
     // ── Event bus and autonomy engine ─────────────────────────────────────
     let event_bus = Arc::new(EventBus::new());
     let autonomy = AutonomyEngine::new(config.autonomy.clone());
 
-    // Wire autonomy action callback: notify messenger + log
-    if let Some(ref msg) = messenger {
-        let msg = msg.clone();
+    // Wire autonomy action callback: notify messenger + forward events via uplink
+    {
+        let msg = messenger.clone();
+        let up = uplink.clone();
         autonomy.set_on_action_executed(move |rule_name, event_type, data| {
             let msg = msg.clone();
+            let up = up.clone();
+            let rule_name = rule_name.clone();
+            let event_type = event_type.clone();
             Box::pin(async move {
-                if event_type == DroneEventTypes::MESSAGE_RECEIVED && msg.is_connected() {
-                    if let Some(from) = data.get("from").and_then(|f| f.as_str()) {
-                        if !from.is_empty() {
-                            let _ = msg.send_message(from, "[Auto-reply] Acknowledged by Velocity Drone").await;
+                // Auto-reply via messenger on message events
+                if event_type == DroneEventTypes::MESSAGE_RECEIVED {
+                    if let Some(ref msg) = msg {
+                        if msg.is_connected() {
+                            if let Some(from) = data.get("from").and_then(|f| f.as_str()) {
+                                if !from.is_empty() {
+                                    let _ = msg.send_message(from, "[Auto-reply] Acknowledged by Velocity Drone").await;
+                                }
+                            }
                         }
                     }
                 }
                 tracing::info!("[Autonomy] Action executed: rule={}, event={}", rule_name, event_type);
+
+                // Forward autonomy events to uplink as notifications
+                if let Some(ref up) = up {
+                    if up.is_connected() {
+                        let notification = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "method": "notifications/droneEvent",
+                            "params": {
+                                "eventType": event_type,
+                                "data": data,
+                                "ruleName": rule_name,
+                            }
+                        });
+                        let json_str = notification.to_string();
+                        let _ = up.send_notification(&json_str).await;
+                    }
+                }
             })
         }).await;
     }
@@ -279,9 +311,40 @@ async fn main() -> anyhow::Result<()> {
     });
     let _ = custody_reporter; // used for future reporting
 
-    // ── Uplink (placeholder — VelocityConnection not yet ported) ──────────
-    if config.uplink.websocket_url.is_some() {
-        tracing::info!("Uplink configured (VelocityConnection not yet ported to Rust)");
+    // ── Uplink handlers + connection ──────────────────────────────────────
+    if let Some(ref uplink) = uplink {
+        // Forward incoming JSON-RPC requests to the MCP server
+        let mcp_req = mcp_server.clone();
+        let up_req = uplink.clone();
+        uplink.set_on_request(move |request: serde_json::Value| {
+            let mcp = mcp_req.clone();
+            let up = up_req.clone();
+            Box::pin(async move {
+                let response = mcp.handle_request(&request, "uplink").await;
+                let json_str = response.to_string();
+                let _ = up.send_response(&json_str).await;
+                json_str
+            })
+        }).await;
+
+        // Log incoming notifications from the server
+        let up_not = uplink.clone();
+        uplink.set_on_notification(move |notification: serde_json::Value| {
+            let _up = up_not.clone();
+            Box::pin(async move {
+                tracing::info!("[Uplink] Notification: {}", notification);
+            })
+        }).await;
+
+        // Spawn the uplink connection task
+        let uplink_connect = uplink.clone();
+        let uplink_cancel = cancel_rx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = uplink_connect.connect(uplink_cancel).await {
+                tracing::error!("Uplink connection error: {}", e);
+            }
+        });
+        tracing::info!("Uplink configured: {}", config.uplink.websocket_url.as_deref().unwrap_or(""));
     }
 
     // ── Ready ─────────────────────────────────────────────────────────────
