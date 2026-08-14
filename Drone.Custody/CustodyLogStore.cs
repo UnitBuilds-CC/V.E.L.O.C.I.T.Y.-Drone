@@ -6,6 +6,7 @@ namespace Drone.Custody;
 /// <summary>
 /// Append-only JSON-lines storage for custody records.
 /// Maintains per-drone files and a merged global timeline.
+/// Supports Merkle root verification for O(log N) batch integrity checks.
 /// </summary>
 public class CustodyLogStore : IDisposable
 {
@@ -17,7 +18,7 @@ public class CustodyLogStore : IDisposable
     private DateTime _mergedDate;
     private readonly long _maxFileSizeBytes;
 
-    /// <summary>In-memory index: drone ID → list of records (for fast queries).</summary>
+    /// <summary>In-memory index: drone ID -> list of records (for fast queries).</summary>
     private readonly Dictionary<string, List<CustodyRecord>> _droneIndex = new();
 
     /// <summary>Merged timeline across all drones (for cross-drone queries).</summary>
@@ -55,15 +56,29 @@ public class CustodyLogStore : IDisposable
 
     /// <summary>
     /// Store a batch of custody records. Validates hash chain continuity.
+    /// If records have MerkleRoot set, also validates the batch Merkle root.
     /// Returns (accepted, rejected) counts.
     /// </summary>
     public (int accepted, int rejected) StoreRecords(IEnumerable<CustodyRecord> records)
     {
         int accepted = 0, rejected = 0;
+        var recordList = records.ToList();
+
+        // If records have MerkleRoot, verify the batch root
+        var batchRoot = "";
+        if (recordList.Count > 0 && !string.IsNullOrEmpty(recordList[0].MerkleRoot))
+        {
+            batchRoot = recordList[0].MerkleRoot;
+            if (!VerifyBatchMerkleRoot(recordList, batchRoot))
+            {
+                // All records in this batch fail Merkle verification
+                return (0, recordList.Count);
+            }
+        }
 
         lock (_lock)
         {
-            foreach (var record in records)
+            foreach (var record in recordList)
             {
                 if (record == null || string.IsNullOrEmpty(record.DroneId))
                 {
@@ -126,6 +141,52 @@ public class CustodyLogStore : IDisposable
         }
 
         return (accepted, rejected);
+    }
+
+    /// <summary>
+    /// Verify that a batch of records matches the expected Merkle root.
+    /// Computes the Merkle root from the records' content hashes and compares.
+    /// </summary>
+    public static bool VerifyBatchMerkleRoot(IList<CustodyRecord> records, string expectedRoot)
+    {
+        if (records.Count == 0 || string.IsNullOrEmpty(expectedRoot))
+            return false;
+
+        var computedRoot = CustodyChain.ComputeBatchMerkleRoot(records);
+        return computedRoot == expectedRoot;
+    }
+
+    /// <summary>
+    /// Verify the entire custody trail for a drone using Merkle batch verification.
+    /// Groups records by their MerkleRoot and verifies each batch independently.
+    /// </summary>
+    /// <param name="droneId">The drone to verify.</param>
+    /// <returns>Tuple of (totalBatches, validBatches, chainValid).</returns>
+    public (int TotalBatches, int ValidBatches, bool ChainValid) VerifyDroneTrailMerkle(string droneId)
+    {
+        var records = GetDroneRecords(droneId);
+        if (records.Length == 0)
+            return (0, 0, true);
+
+        // First verify the hash chain
+        var chainValid = CustodyChain.VerifyChain(records);
+
+        // Group records by MerkleRoot for batch verification
+        var batches = records
+            .Where(r => !string.IsNullOrEmpty(r.MerkleRoot))
+            .GroupBy(r => r.MerkleRoot)
+            .ToList();
+
+        int validBatches = 0;
+        foreach (var batch in batches)
+        {
+            var root = batch.Key;
+            var batchRecords = batch.ToList();
+            if (VerifyBatchMerkleRoot(batchRecords, root))
+                validBatches++;
+        }
+
+        return (batches.Count, validBatches, chainValid);
     }
 
     /// <summary>Get all records for a specific drone.</summary>

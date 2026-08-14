@@ -6,6 +6,7 @@ namespace Drone.Custody;
 /// <summary>
 /// Query engine for the custody trail. Supports querying by drone ID, time range,
 /// correlation ID, and event type. Wraps CustodyLogStore with higher-level query operations.
+/// Includes Merkle proof generation for O(log N) record verification.
 /// </summary>
 public class CustodyQueryEngine
 {
@@ -79,12 +80,70 @@ public class CustodyQueryEngine
     /// Get the full custody trail for a specific drone, verified for chain integrity.
     /// </summary>
     /// <param name="droneId">The drone to query.</param>
-    /// <returns>Tuple of (records, chainValid) — chainValid is false if any hash breaks detected.</returns>
+    /// <returns>Tuple of (records, chainValid) -- chainValid is false if any hash breaks detected.</returns>
     public (CustodyRecord[] Records, bool ChainValid) GetVerifiedDroneTrail(string droneId)
     {
         var records = _store.GetDroneRecords(droneId);
         var chainValid = CustodyChain.VerifyChain(records);
         return (records, chainValid);
+    }
+
+    /// <summary>
+    /// Get the full custody trail for a drone with Merkle batch verification.
+    /// Returns chain validity plus per-batch Merkle verification results.
+    /// </summary>
+    public (CustodyRecord[] Records, bool ChainValid, int TotalBatches, int ValidBatches) GetVerifiedDroneTrailMerkle(string droneId)
+    {
+        var (totalBatches, validBatches, chainValid) = _store.VerifyDroneTrailMerkle(droneId);
+        var records = _store.GetDroneRecords(droneId);
+        return (records, chainValid, totalBatches, validBatches);
+    }
+
+    /// <summary>
+    /// Build a Merkle proof for a specific record within its batch.
+    /// The record must belong to a batch with a MerkleRoot assigned.
+    /// </summary>
+    /// <param name="droneId">The drone that produced the record.</param>
+    /// <param name="sequence">Sequence number of the record to prove.</param>
+    /// <returns>Proof result, or null if the record is not found or has no MerkleRoot.</returns>
+    public MerkleProofResult? GetMerkleProof(string droneId, long sequence)
+    {
+        var records = _store.GetDroneRecords(droneId);
+        if (records.Length == 0) return null;
+
+        // Find the target record
+        var targetIndex = Array.FindIndex(records, r => r.Sequence == sequence);
+        if (targetIndex < 0) return null;
+
+        var target = records[targetIndex];
+        if (string.IsNullOrEmpty(target.MerkleRoot))
+            return null;
+
+        // Find all records in the same batch (same MerkleRoot)
+        var batchRecords = records
+            .Where(r => r.MerkleRoot == target.MerkleRoot)
+            .ToList();
+
+        if (batchRecords.Count == 0) return null;
+
+        // Find the target's index within the batch
+        var batchIndex = batchRecords.FindIndex(r => r.Sequence == sequence);
+        if (batchIndex < 0) return null;
+
+        // Build the proof
+        var proof = CustodyChain.BuildBatchProof(batchRecords, batchIndex);
+
+        return new MerkleProofResult
+        {
+            DroneId = droneId,
+            Sequence = sequence,
+            ContentHash = target.Hash,
+            MerkleRoot = target.MerkleRoot,
+            BatchIndex = batchIndex,
+            BatchSize = batchRecords.Count,
+            ProofPath = proof,
+            Verified = MerkleTree.VerifyProofHex(target.MerkleRoot, target.Hash, proof, batchIndex)
+        };
     }
 
     /// <summary>
@@ -119,6 +178,34 @@ public class CustodyQueryEngine
             MergedTimelineCount = _store.GetMergedTimeline().Length
         };
     }
+}
+
+/// <summary>Result of a Merkle proof computation for a custody record.</summary>
+public class MerkleProofResult
+{
+    /// <summary>Drone that produced the record.</summary>
+    public string DroneId { get; set; } = "";
+
+    /// <summary>Sequence number of the proven record.</summary>
+    public long Sequence { get; set; }
+
+    /// <summary>Content hash of the record (hex).</summary>
+    public string ContentHash { get; set; } = "";
+
+    /// <summary>Merkle root of the batch (hex).</summary>
+    public string MerkleRoot { get; set; } = "";
+
+    /// <summary>Index of the record within the batch (0-based).</summary>
+    public int BatchIndex { get; set; }
+
+    /// <summary>Total records in the batch.</summary>
+    public int BatchSize { get; set; }
+
+    /// <summary>Merkle proof path (array of hex sibling hashes, bottom to top).</summary>
+    public string[] ProofPath { get; set; } = Array.Empty<string>();
+
+    /// <summary>Whether the proof verified successfully.</summary>
+    public bool Verified { get; set; }
 }
 
 /// <summary>Summary of the custody trail state.</summary>

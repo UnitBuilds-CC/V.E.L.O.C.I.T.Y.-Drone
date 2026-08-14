@@ -3,6 +3,7 @@ namespace Drone.Core.Custody;
 /// <summary>
 /// Manages the hash chain for custody records. Tracks the previous record's hash
 /// and assigns monotonic sequence numbers. Thread-safe.
+/// Supports Merkle batch verification for O(log N) integrity checks.
 /// </summary>
 public class CustodyChain
 {
@@ -87,6 +88,81 @@ public class CustodyChain
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Compute the Merkle root over a batch of records using their content hashes as leaves.
+    /// This enables O(log N) batch verification instead of O(N) chain walk.
+    /// </summary>
+    /// <param name="records">Records in the batch (must have Hash set).</param>
+    /// <returns>Hex-encoded Merkle root (64 chars).</returns>
+    public static string ComputeBatchMerkleRoot(IEnumerable<CustodyRecord> records)
+    {
+        var leaves = records
+            .Where(r => !string.IsNullOrEmpty(r.Hash))
+            .Select(r => Convert.FromHexString(r.Hash))
+            .ToArray();
+
+        if (leaves.Length == 0)
+            return "";
+
+        var root = MerkleTree.ComputeRoot(leaves);
+        return Convert.ToHexString(root);
+    }
+
+    /// <summary>
+    /// Verify a batch of records against a known Merkle root.
+    /// All records must have their MerkleRoot field set to the expected root.
+    /// </summary>
+    /// <param name="records">Records to verify (must have Hash and MerkleRoot set).</param>
+    /// <param name="expectedRoot">Expected Merkle root (hex).</param>
+    /// <returns>True if all records verify against the root.</returns>
+    public static bool VerifyBatchMerkleRoot(IEnumerable<CustodyRecord> records, string expectedRoot)
+    {
+        var recordList = records.ToList();
+        if (recordList.Count == 0) return false;
+
+        // Compute the root from the records' hashes
+        var computedRoot = ComputeBatchMerkleRoot(recordList);
+        return computedRoot == expectedRoot;
+    }
+
+    /// <summary>
+    /// Assign Merkle roots to a batch of records. Computes the Merkle root over all records
+    /// and sets the MerkleRoot field on each record to the same value.
+    /// </summary>
+    /// <param name="records">Records to assign roots to (must have Hash set).</param>
+    /// <returns>The computed Merkle root (hex), or empty if no records.</returns>
+    public static string AssignBatchMerkleRoot(IList<CustodyRecord> records)
+    {
+        if (records.Count == 0) return "";
+
+        var root = ComputeBatchMerkleRoot(records);
+        foreach (var record in records)
+        {
+            record.MerkleRoot = root;
+        }
+        return root;
+    }
+
+    /// <summary>
+    /// Build a Merkle proof for a specific record within a batch.
+    /// </summary>
+    /// <param name="records">All records in the batch (must have Hash set).</param>
+    /// <param name="batchIndex">Index of the record to prove (0-based within the batch).</param>
+    /// <returns>Array of hex-encoded sibling hashes forming the proof path.</returns>
+    public static string[] BuildBatchProof(IList<CustodyRecord> records, int batchIndex)
+    {
+        var leaves = records
+            .Where(r => !string.IsNullOrEmpty(r.Hash))
+            .Select(r => Convert.FromHexString(r.Hash))
+            .ToArray();
+
+        if (leaves.Length == 0 || batchIndex < 0 || batchIndex >= leaves.Length)
+            return Array.Empty<string>();
+
+        var proof = MerkleTree.BuildProof(leaves, batchIndex);
+        return proof.Select(p => Convert.ToHexString(p)).ToArray();
     }
 
     /// <summary>

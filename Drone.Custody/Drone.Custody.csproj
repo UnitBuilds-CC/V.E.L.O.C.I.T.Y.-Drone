@@ -8,5 +8,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Drone.Core\Drone.Core.csproj" />
+    <ProjectReference Include="..\Drone.Native\Drone.Native.csproj" />
   </ItemGroup>
 </Project>

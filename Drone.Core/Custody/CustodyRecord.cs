@@ -7,6 +7,7 @@ namespace Drone.Core.Custody;
 /// <summary>
 /// A single custody record in the audit trail. Each record is hash-chained to the previous one,
 /// creating a tamper-evident log of every action the agent takes across all connected systems.
+/// Supports Merkle root for batch verification (NMCP binary protocol compatibility).
 /// </summary>
 public class CustodyRecord
 {
@@ -63,7 +64,16 @@ public class CustodyRecord
     public string Hash { get; set; } = "";
 
     /// <summary>
-    /// Compute the content hash of this record (excluding prevHash and hash fields).
+    /// Merkle root over the batch this record belongs to.
+    /// Set when records are flushed in batch by CustodyAuditLogger.
+    /// Enables O(log N) verification via Merkle proof instead of O(N) chain walk.
+    /// Hex-encoded SHA-256 (64 chars). Empty if not yet assigned to a batch.
+    /// </summary>
+    [JsonPropertyName("merkleRoot")]
+    public string MerkleRoot { get; set; } = "";
+
+    /// <summary>
+    /// Compute the content hash of this record (excluding prevHash, hash, and merkleRoot fields).
     /// Used for both computing and verifying the hash chain.
     /// </summary>
     public string ComputeHash()
@@ -107,6 +117,26 @@ public class CustodyRecord
 
         // This record's PrevHash must match the previous record's Hash
         return PrevHash == previousRecord.Hash;
+    }
+
+    /// <summary>
+    /// Verify this record's Merkle proof against a known batch root.
+    /// Requires MerkleRoot to be set and the proof to be provided.
+    /// </summary>
+    /// <param name="batchRoot">Expected Merkle root for the batch (hex).</param>
+    /// <param name="proof">Merkle proof path (array of hex sibling hashes).</param>
+    /// <param name="batchIndex">This record's index within the batch (0-based).</param>
+    /// <returns>True if the Merkle proof is valid.</returns>
+    public bool VerifyMerkleProof(string batchRoot, string[] proof, int batchIndex)
+    {
+        if (string.IsNullOrEmpty(Hash) || string.IsNullOrEmpty(MerkleRoot))
+            return false;
+
+        // The record's own MerkleRoot should match the batch root
+        if (MerkleRoot != batchRoot)
+            return false;
+
+        return MerkleTree.VerifyProofHex(batchRoot, Hash, proof, batchIndex);
     }
 
     /// <summary>Serialize to JSON for storage/transmission.</summary>

@@ -5,12 +5,14 @@ using global::System.Text.Json;
 using Drone.Core;
 using Drone.Core.Custody;
 using Drone.Core.Protocol;
+using Drone.Native;
 
 namespace Drone.Custody;
 
 /// <summary>
 /// WebSocket server that accepts CustodyReport frames from drones,
 /// validates hash chains, maintains timelines, and provides query/streaming.
+/// Supports both JSON (type 40) and binary NMCP Merkle frames (type 44).
 /// </summary>
 public class CustodyServerHost : IAsyncDisposable
 {
@@ -24,6 +26,9 @@ public class CustodyServerHost : IAsyncDisposable
 
     /// <summary>Maximum concurrent drone connections.</summary>
     private const int MaxConnections = 256;
+
+    /// <summary>NMCP Merkle frame magic bytes: "NMCP" (0x4E4D4350).</summary>
+    private static readonly byte[] NmcpMerkleMagic = { 0x4E, 0x4D, 0x43, 0x50 };
 
     /// <summary>Per-drone expected sequence for chain validation on receipt.</summary>
     private readonly Dictionary<string, (long Seq, string Hash)> _droneChainState = new();
@@ -170,9 +175,26 @@ public class CustodyServerHost : IAsyncDisposable
     {
         try
         {
-            var json = Encoding.UTF8.GetString(data);
-            var records = JsonSerializer.Deserialize<CustodyRecord[]>(json, CustodyRecord.JsonOptions);
-            if (records == null || records.Length == 0) return;
+            CustodyRecord[]? records;
+
+            // Detect NMCP Merkle binary frame: starts with "NMCP" magic (0x4E4D4350)
+            if (IsNmcpMerkleFrame(data))
+            {
+                records = ProcessBinaryCustodyFrame(data);
+                if (records == null || records.Length == 0)
+                {
+                    _logger.LogWarning("Failed to parse NMCP Merkle custody frame");
+                    return;
+                }
+                _logger.LogInformation("Received binary custody frame: {Count} records (Merkle-verified)", records.Length);
+            }
+            else
+            {
+                // JSON fallback
+                var json = Encoding.UTF8.GetString(data);
+                records = JsonSerializer.Deserialize<CustodyRecord[]>(json, CustodyRecord.JsonOptions);
+                if (records == null || records.Length == 0) return;
+            }
 
             // Validate chain continuity against server-side state
             var validRecords = new List<CustodyRecord>();
@@ -223,6 +245,36 @@ public class CustodyServerHost : IAsyncDisposable
         {
             _logger.LogWarning("Error processing custody report: {Error}", ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Check if data starts with NMCP Merkle frame magic bytes (0x4E4D4350 = "NMCP").
+    /// This distinguishes binary frames from JSON custody reports.
+    /// </summary>
+    private static bool IsNmcpMerkleFrame(byte[] data)
+    {
+        return data.Length >= 36 &&
+               data[0] == 0x4E && data[1] == 0x4D &&
+               data[2] == 0x43 && data[3] == 0x50;
+    }
+
+    /// <summary>
+    /// Parse an NMCP Merkle binary custody frame.
+    /// Layout: [4-byte magic "NMCP"] [32-byte Merkle root] [N x 256-byte records]
+    /// Validates the Merkle root using native Rust parser (if available), then
+    /// deserializes records using managed binary serializer.
+    /// </summary>
+    private CustodyRecord[]? ProcessBinaryCustodyFrame(byte[] data)
+    {
+        // Try native Rust Merkle frame validation (verifies magic + extracts root)
+        var merkleRoot = new byte[32];
+        if (NativeBindings.TryParseMerkleFrame(data, merkleRoot, out var payloadLen))
+        {
+            _logger.LogInformation("NMCP Merkle frame validated via native parser (payload={Len})", payloadLen);
+        }
+
+        // Deserialize records using managed binary serializer (validates Merkle root internally)
+        return CustodyBinarySerializer.DeserializeBatch(data);
     }
 
     private async Task BroadcastToStreamClientsAsync(byte[] data)

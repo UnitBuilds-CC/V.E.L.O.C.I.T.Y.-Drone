@@ -4,6 +4,7 @@ using System.Text.Json;
 using Drone.Core;
 using Drone.Core.Config;
 using Drone.Core.Custody;
+using Drone.Core.Protocol;
 using Drone.MCP;
 
 namespace Drone.E2E;
@@ -444,6 +445,124 @@ public class Program
                 {
                     Console.WriteLine($"FAIL (sealed={allSealed}, seq={sequencesCorrect}, genesis={genesisOk}, chained={chainedOk}, corr={correlationOk})");
                     failed++;
+                }
+            }
+        }
+        catch (Exception ex) { Console.WriteLine($"FAIL ({ex.Message})"); failed++; }
+
+        // Test 12: NMCP binary custody — Merkle root → binary serialize → parse → verify → chain integrity
+        try
+        {
+            Console.Write("Test 12: NMCP binary custody E2E (Merkle → binary → parse → verify)... ");
+
+            // Step 1: Create custody records via CustodyChain
+            var chain = new CustodyChain("binary-e2e-drone");
+            var records = new CustodyRecord[5];
+            for (int i = 0; i < 5; i++)
+                records[i] = chain.NextRecord(i % 2 == 0 ? "tool_call" : "connection", $"action-{i}");
+
+            // Step 2: Compute Merkle root over the batch
+            var merkleRoot = CustodyChain.ComputeBatchMerkleRoot(records);
+            if (string.IsNullOrEmpty(merkleRoot) || merkleRoot.Length != 64)
+            {
+                Console.WriteLine($"FAIL (Merkle root invalid: '{merkleRoot}')");
+                failed++;
+            }
+            else
+            {
+                // Step 3: Assign Merkle root to records (batch signing)
+                var assignedRoot = CustodyChain.AssignBatchMerkleRoot(records);
+                if (assignedRoot != merkleRoot)
+                {
+                    Console.WriteLine($"FAIL (assigned root '{assignedRoot[..16]}...' != computed '{merkleRoot[..16]}...')");
+                    failed++;
+                }
+                else
+                {
+                    // Step 5: Serialize as NMCP binary Merkle frame
+                    var binaryFrame = CustodyBinarySerializer.SerializeBatch(records);
+                    var frameSize = CustodyBinarySerializer.MerkleHeaderSize + (5 * CustodyBinarySerializer.RecordSize);
+
+                    if (binaryFrame.Length != frameSize)
+                    {
+                        Console.WriteLine($"FAIL (frame size {binaryFrame.Length} != expected {frameSize})");
+                        failed++;
+                    }
+                    else
+                    {
+                        // Step 6: Verify NMCP Merkle magic bytes
+                        var magicOk = binaryFrame[0] == 0x4E && binaryFrame[1] == 0x4D &&
+                                      binaryFrame[2] == 0x43 && binaryFrame[3] == 0x50;
+
+                        // Step 7: Extract and verify Merkle root from frame header
+                        var extractedRoot = CustodyBinarySerializer.ExtractMerkleRoot(binaryFrame);
+                        var rootMatch = extractedRoot != null &&
+                            Convert.ToHexString(extractedRoot!) == merkleRoot;
+
+                        // Step 8: Deserialize and verify records
+                        var restored = CustodyBinarySerializer.DeserializeBatch(binaryFrame);
+
+                        if (!magicOk)
+                        {
+                            Console.WriteLine("FAIL (NMCP Merkle magic bytes incorrect)");
+                            failed++;
+                        }
+                        else if (!rootMatch)
+                        {
+                            Console.WriteLine("FAIL (Merkle root in frame doesn't match computed)");
+                            failed++;
+                        }
+                        else if (restored == null || restored.Length != 5)
+                        {
+                            Console.WriteLine($"FAIL (deserialization returned {restored?.Length ?? 0} records)");
+                            failed++;
+                        }
+                        else
+                        {
+                            // Step 9: Verify hash chain integrity after round-trip
+                            var chainIntact = CustodyChain.VerifyChain(restored);
+
+                            // Step 10: Verify Merkle batch verification works on restored records
+                            var batchValid = CustodyChain.VerifyBatchMerkleRoot(restored, merkleRoot);
+
+                            // Step 11: Build full NMCP CustodyBinary frame (type 44)
+                            var fullFrame = CustodyBinarySerializer.BuildFrame(records, 1);
+                            var headerOk = NmcpFrame.TryReadHeader(fullFrame, out var ft, out var pl, out var seq);
+
+                            if (!chainIntact)
+                            {
+                                Console.WriteLine("FAIL (hash chain broken after binary round-trip)");
+                                failed++;
+                            }
+                            else if (!batchValid)
+                            {
+                                Console.WriteLine("FAIL (Merkle batch verification failed on restored records)");
+                                failed++;
+                            }
+                            else if (!headerOk || ft != NmcpFrameTypes.CustodyBinary)
+                            {
+                                Console.WriteLine($"FAIL (NMCP frame type mismatch: {ft} != {NmcpFrameTypes.CustodyBinary})");
+                                failed++;
+                            }
+                            else
+                            {
+                                // Step 12: Build and verify Merkle proof for a single record
+                                var proof = CustodyChain.BuildBatchProof(records, 2);
+                                var proofVerified = records[2].VerifyMerkleProof(merkleRoot, proof, 2);
+
+                                if (proofVerified)
+                                {
+                                    Console.WriteLine($"PASS (5 records, Merkle={merkleRoot[..16]}..., chain intact, frame type=44, proof verified)");
+                                    passed++;
+                                }
+                                else
+                                {
+                                    Console.WriteLine("FAIL (Merkle proof verification failed)");
+                                    failed++;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

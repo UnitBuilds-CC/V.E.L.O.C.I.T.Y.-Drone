@@ -1,4 +1,4 @@
-﻿using System.Buffers;
+using System.Buffers;
 using global::System.IO.MemoryMappedFiles;
 using global::System.Net.WebSockets;
 using global::System.Text;
@@ -11,8 +11,8 @@ namespace Drone.Core;
 /// <summary>
 /// High-performance bidirectional connection for the Velocity Drone uplink.
 /// Supports two transport modes:
-///   - NMCP shared memory (local, zero-copy, sub-microsecond)
-///   - WebSocket with NMCP binary frames (remote, with JSON-RPC fallback)
+///   - NMCP shared memory (local, zero-copy, atomic state machine, 100us polling)
+///   - WebSocket with NMCP binary frames (remote, with auto-reconnect + heartbeat)
 /// </summary>
 public class VelocityConnection : IAsyncDisposable
 {
@@ -23,15 +23,44 @@ public class VelocityConnection : IAsyncDisposable
     private ClientWebSocket? _ws;
     private CancellationTokenSource? _cts;
     private uint _sequenceId;
-    private bool _connected;
+    private volatile bool _connected;
+    private int _reconnectAttempts;
+    private Task? _heartbeatTask;
 
-    /// <summary>Raised when a JSON-RPC request is received from the AI.</summary>
+    /// <summary>Lock to serialize concurrent WebSocket sends (heartbeat vs response/notification).</summary>
+    private readonly SemaphoreSlim _wsSendLock = new(1, 1);
+
+    /// <summary>Timeout for WebSocket send operations to prevent slow-client hangs.</summary>
+    private static readonly TimeSpan WsSendTimeout = TimeSpan.FromSeconds(10);
+
+    // --- Atomic shared memory layout (matches McpServer / V.E.L.O.C.I.T.Y.-MCP) ---
+    // Request channel:  [0] = state byte, [1..4] = payload length (int32 LE), [5..4099] = payload (4096 bytes)
+    // Response channel: [4100] = state byte, [4101..4104] = payload length (int32 LE), [4105..65535] = payload (61431 bytes)
+    private const int ShmemTotalSize = 65536;
+    private const int ReqStateOffset = 0;
+    private const int ReqLenOffset = 1;
+    private const int ReqPayloadOffset = 5;
+    private const int ReqPayloadSize = 4096;
+    private const int ResStateOffset = 4100;
+    private const int ResLenOffset = 4101;
+    private const int ResPayloadOffset = 4105;
+    private const int ResPayloadSize = ShmemTotalSize - ResPayloadOffset;
+
+    // Atomic state machine
+    private const byte StateIdle = 0;
+    private const byte StateReqReady = 1;
+    private const byte StateProcessing = 2;
+    private const byte StateResReady = 3;
+    private const byte StateError = 4;
+
+    /// <summary>Polling spin-wait iterations before yielding.</summary>
+    private const int ShmemSpinWaitIterations = 30;
+
+    /// <summary>Heartbeat interval in seconds. Sends a heartbeat frame to keep the connection alive.</summary>
+    private const int HeartbeatIntervalSec = 30;
+
     public event Func<JsonElement, Task>? OnRequest;
-
-    /// <summary>Raised when a notification is received (no response expected).</summary>
     public event Func<JsonElement, Task>? OnNotification;
-
-    /// <summary>Whether the connection is currently active.</summary>
     public bool IsConnected => _connected;
 
     public VelocityConnection(UplinkConfig config, ILogger logger)
@@ -40,17 +69,17 @@ public class VelocityConnection : IAsyncDisposable
         _logger = logger;
     }
 
-    /// <summary>Connect using the configured transport (auto-negotiates).</summary>
     public async Task ConnectAsync(CancellationToken ct = default)
     {
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _reconnectAttempts = 0;
 
         if (_config.Transport == "shmem" || _config.Transport == "auto")
         {
             try
             {
                 ConnectSharedMemory();
-                _logger.LogInformation("Connected via NMCP shared memory at {Path}", _config.BufferPath);
+                _logger.LogInformation("Connected via NMCP shared memory at {Path} (atomic shmem)", _config.BufferPath);
                 _connected = true;
                 _ = Task.Run(() => SharedMemoryReadLoop(_cts.Token));
                 return;
@@ -66,83 +95,101 @@ public class VelocityConnection : IAsyncDisposable
             if (string.IsNullOrEmpty(_config.WebSocketUrl))
                 throw new InvalidOperationException("WebSocket URL required when transport is 'websocket' or 'auto' fallback fails.");
 
-            await ConnectWebSocketAsync(_cts.Token);
+            await ConnectWebSocketAsync();
             _logger.LogInformation("Connected via WebSocket at {Url}", _config.WebSocketUrl);
         }
     }
 
-    /// <summary>Send a JSON-RPC response back to the AI.</summary>
     public async Task SendResponseAsync(string json, CancellationToken ct = default)
     {
         var payload = Encoding.UTF8.GetBytes(json);
-        var frame = new NmcpFrame(NmcpFrameTypes.JsonRpcResponse, Interlocked.Increment(ref _sequenceId), payload);
 
         if (_mmf != null)
-        {
-            WriteFrameToSharedMemory(frame);
-        }
+            WriteRequestToShmem(payload);
         else if (_ws?.State == WebSocketState.Open)
         {
-            await _ws.SendAsync(new ArraySegment<byte>(payload), WebSocketMessageType.Text, true, ct);
+            var frame = new NmcpFrame(NmcpFrameTypes.JsonRpcResponse, Interlocked.Increment(ref _sequenceId), payload);
+            await SafeWsSendAsync(frame.Payload.ToArray(), WebSocketMessageType.Text, ct);
         }
     }
 
-    /// <summary>Send a notification to the AI (no response expected).</summary>
     public async Task SendNotificationAsync(string json, CancellationToken ct = default)
     {
         var payload = Encoding.UTF8.GetBytes(json);
-        var frame = new NmcpFrame(NmcpFrameTypes.JsonRpcNotification, Interlocked.Increment(ref _sequenceId), payload);
 
         if (_mmf != null)
-        {
-            WriteFrameToSharedMemory(frame);
-        }
+            WriteRequestToShmem(payload);
         else if (_ws?.State == WebSocketState.Open)
         {
-            await _ws.SendAsync(new ArraySegment<byte>(payload), WebSocketMessageType.Text, true, ct);
+            var frame = new NmcpFrame(NmcpFrameTypes.JsonRpcNotification, Interlocked.Increment(ref _sequenceId), payload);
+            await SafeWsSendAsync(frame.Payload.ToArray(), WebSocketMessageType.Text, ct);
+        }
+    }
+
+    /// <summary>Thread-safe WebSocket send with timeout — serializes heartbeat and data sends.</summary>
+    private async Task SafeWsSendAsync(byte[] data, WebSocketMessageType messageType, CancellationToken ct)
+    {
+        if (!await _wsSendLock.WaitAsync(WsSendTimeout, ct)) return;
+        try
+        {
+            using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            sendCts.CancelAfter(WsSendTimeout);
+            await _ws!.SendAsync(new ArraySegment<byte>(data), messageType, true, sendCts.Token);
+        }
+        catch (OperationCanceledException) { /* send timeout or cancel */ }
+        finally
+        {
+            _wsSendLock.Release();
         }
     }
 
     private void ConnectSharedMemory()
     {
-        var fileSize = _config.BufferSize;
-
-        // Create or open the memory-mapped file
+        var fileSize = _config.BufferSize > 0 ? _config.BufferSize : ShmemTotalSize;
         if (File.Exists(_config.BufferPath))
-        {
             _mmf = MemoryMappedFile.CreateFromFile(_config.BufferPath, FileMode.Open, "NmcpDroneBuffer", fileSize, MemoryMappedFileAccess.ReadWrite);
-        }
         else
-        {
             _mmf = MemoryMappedFile.CreateFromFile(_config.BufferPath, FileMode.CreateNew, "NmcpDroneBuffer", fileSize, MemoryMappedFileAccess.ReadWrite);
-        }
 
         _view = _mmf.CreateViewAccessor(0, fileSize);
+        // Initialize both channels to IDLE
+        _view.Write(ReqStateOffset, StateIdle);
+        _view.Write(ResStateOffset, StateIdle);
     }
 
-    private void WriteFrameToSharedMemory(NmcpFrame frame)
+    /// <summary>
+    /// Write a request to shared memory using the atomic state machine protocol.
+    /// Client writes payload, sets REQ_READY, then waits for RES_READY.
+    /// </summary>
+    private void WriteRequestToShmem(byte[] payload)
     {
         if (_view == null) return;
+        if (payload.Length > ReqPayloadSize) return; // Payload too large for shmem
 
-        var header = new byte[NmcpFrame.HeaderSize];
-        frame.WriteHeader(header);
-
-        // Simple protocol: write header + payload at current write position
-        // In production, this would use a proper ring buffer with atomic operations
-        var offset = 0L;
-        _view.WriteArray(offset, header, 0, header.Length);
-        offset += header.Length;
-
-        if (frame.PayloadLength > 0)
+        // Wait for IDLE state (server finished previous request)
+        var spinWait = new SpinWait();
+        while (_view.ReadByte(ReqStateOffset) != StateIdle)
         {
-            var payloadArray = frame.Payload.ToArray();
-            _view.WriteArray(offset, payloadArray, 0, payloadArray.Length);
+            spinWait.SpinOnce();
+            if (spinWait.Count > ShmemSpinWaitIterations * 10)
+            {
+                // Timeout waiting for server — bail out
+                return;
+            }
         }
+
+        // Write payload
+        _view.Write(ReqLenOffset, payload.Length);
+        if (payload.Length > 0)
+            _view.WriteArray(ReqPayloadOffset, payload, 0, payload.Length);
+
+        // Signal REQ_READY
+        _view.Write(ReqStateOffset, StateReqReady);
     }
 
     private async Task SharedMemoryReadLoop(CancellationToken ct)
     {
-        var buffer = new byte[_config.BufferSize];
+        var spinWait = new SpinWait();
 
         while (!ct.IsCancellationRequested)
         {
@@ -150,32 +197,56 @@ public class VelocityConnection : IAsyncDisposable
             {
                 if (_view == null) break;
 
-                // Poll for new frames (in production, use event-based signaling)
-                var header = new byte[NmcpFrame.HeaderSize];
-                _view.ReadArray(0, header, 0, header.Length);
+                // Poll for RES_READY state
+                var resState = _view.ReadByte(ResStateOffset);
 
-                if (NmcpFrame.TryReadHeader(header, out var frameType, out var payloadLen, out var seqId))
+                if (resState == StateResReady)
                 {
-                    if (payloadLen > 0 && payloadLen < buffer.Length)
+                    // Read response payload
+                    var resLen = _view.ReadInt32(ResLenOffset);
+                    if (resLen > 0 && resLen <= ResPayloadSize)
                     {
-                        _view.ReadArray(NmcpFrame.HeaderSize, buffer, 0, (int)payloadLen);
-                        var json = Encoding.UTF8.GetString(buffer, 0, (int)payloadLen);
+                        var buffer = new byte[resLen];
+                        _view.ReadArray(ResPayloadOffset, buffer, 0, resLen);
 
-                        using var doc = JsonDocument.Parse(json);
-                        var root = doc.RootElement;
+                        var json = Encoding.UTF8.GetString(buffer);
 
-                        if (root.TryGetProperty("method", out _))
+                        try
                         {
-                            if (OnRequest != null) await OnRequest(root);
+                            using var doc = JsonDocument.Parse(json);
+                            var root = doc.RootElement;
+
+                            if (root.TryGetProperty("method", out _))
+                            {
+                                if (OnRequest != null) await OnRequest(root);
+                            }
+                            else
+                            {
+                                if (OnNotification != null) await OnNotification(root);
+                            }
                         }
-                        else
+                        catch (JsonException ex)
                         {
-                            if (OnNotification != null) await OnNotification(root);
+                            _logger.LogError("Shared memory JSON parse error: {Error}", ex.Message);
                         }
                     }
+
+                    // Reset response channel to IDLE
+                    _view.Write(ResStateOffset, StateIdle);
+                }
+                else if (resState == StateError)
+                {
+                    // Server signaled error — reset and continue
+                    _view.Write(ResStateOffset, StateIdle);
                 }
 
-                await Task.Delay(1, ct); // 1ms poll interval for shmem
+                // 100 microsecond polling via spin-wait
+                spinWait.SpinOnce();
+                if (spinWait.Count > ShmemSpinWaitIterations)
+                {
+                    await Task.Delay(0, ct);
+                    spinWait.Reset();
+                }
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
@@ -186,35 +257,45 @@ public class VelocityConnection : IAsyncDisposable
         }
     }
 
-    private async Task ConnectWebSocketAsync(CancellationToken ct)
+    private async Task ConnectWebSocketAsync()
     {
         _ws = new ClientWebSocket();
-
         if (!string.IsNullOrEmpty(_config.WebSocketUrl))
         {
-            await _ws.ConnectAsync(new Uri(_config.WebSocketUrl), ct);
+            await _ws.ConnectAsync(new Uri(_config.WebSocketUrl), _cts!.Token);
             _connected = true;
-            _ = Task.Run(() => WebSocketReadLoop(ct));
+            _reconnectAttempts = 0;
+            // Use _cts.Token consistently so the read loop respects the linked lifetime
+            _ = Task.Run(() => WebSocketReadLoop(_cts.Token));
+            // Start heartbeat to keep connection alive and detect dead peers
+            StartHeartbeat(_cts.Token);
         }
     }
 
     private async Task WebSocketReadLoop(CancellationToken ct)
     {
-        var buffer = new byte[64 * 1024]; // 64KB receive buffer
+        var buffer = new byte[64 * 1024];
+        using var ms = new MemoryStream();
 
         while (!ct.IsCancellationRequested && _ws?.State == WebSocketState.Open)
         {
             try
             {
-                var result = await _ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
-
-                if (result.MessageType == WebSocketMessageType.Close)
+                // Handle message fragmentation: accumulate chunks until EndOfMessage
+                ms.SetLength(0);
+                WebSocketReceiveResult result;
+                do
                 {
-                    _connected = false;
-                    break;
-                }
+                    result = await _ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
+                    if (result.MessageType == WebSocketMessageType.Close)
+                    {
+                        _connected = false;
+                        return;
+                    }
+                    ms.Write(buffer, 0, result.Count);
+                } while (!result.EndOfMessage);
 
-                var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                var json = Encoding.UTF8.GetString(ms.ToArray());
                 using var doc = JsonDocument.Parse(json);
                 var root = doc.RootElement;
 
@@ -234,21 +315,66 @@ public class VelocityConnection : IAsyncDisposable
             }
         }
 
-        // Auto-reconnect if configured
-        if (_config.AutoReconnect && !ct.IsCancellationRequested)
+        // Auto-reconnect with attempt limit
+        if (_config.AutoReconnect && !ct.IsCancellationRequested && _reconnectAttempts < _config.MaxReconnectAttempts)
         {
-            _logger.LogInformation("Connection lost. Reconnecting...");
-            await Task.Delay(1000, ct);
-            try { await ConnectWebSocketAsync(ct); } catch { /* retry handled by caller */ }
+            _reconnectAttempts++;
+            _logger.LogInformation("Connection lost. Reconnect attempt {Attempt}/{Max}...", _reconnectAttempts, _config.MaxReconnectAttempts);
+            await Task.Delay(1000 * _reconnectAttempts, ct);
+            try { await ConnectWebSocketAsync(); }
+            catch (Exception ex) { _logger.LogWarning("Reconnect failed: {Error}", ex.Message); }
         }
+        else if (_reconnectAttempts >= _config.MaxReconnectAttempts)
+        {
+            _logger.LogError("Max reconnect attempts ({Max}) reached. Giving up.", _config.MaxReconnectAttempts);
+        }
+    }
+
+    private void StartHeartbeat(CancellationToken ct)
+    {
+        _heartbeatTask = Task.Run(async () =>
+        {
+            while (!ct.IsCancellationRequested && _ws?.State == WebSocketState.Open)
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(HeartbeatIntervalSec), ct);
+                    if (_ws?.State == WebSocketState.Open)
+                    {
+                        var heartbeat = new NmcpFrame(NmcpFrameTypes.Heartbeat, Interlocked.Increment(ref _sequenceId), Array.Empty<byte>());
+                        var header = new byte[NmcpFrame.HeaderSize];
+                        heartbeat.WriteHeader(header);
+                        // Use the send lock to prevent concurrent sends with response/notification
+                        await SafeWsSendAsync(header, WebSocketMessageType.Binary, ct);
+                    }
+                }
+                catch (OperationCanceledException) { break; }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning("Heartbeat failed: {Error}", ex.Message);
+                    break;
+                }
+            }
+        }, ct);
     }
 
     public async ValueTask DisposeAsync()
     {
         _cts?.Cancel();
+        // Wait for heartbeat to finish before disposing WebSocket
+        if (_heartbeatTask != null)
+        {
+            try { await _heartbeatTask; } catch { }
+        }
+        if (_ws?.State == WebSocketState.Open)
+        {
+            try { await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Disposing", CancellationToken.None); }
+            catch { }
+        }
         _ws?.Dispose();
         _view?.Dispose();
         _mmf?.Dispose();
+        _wsSendLock.Dispose();
         _cts?.Dispose();
         GC.SuppressFinalize(this);
     }
