@@ -36,6 +36,7 @@ const MAX_CONNECTIONS: usize = 16;
 pub type ToolHandler = Arc<dyn Fn(JsonValue) -> std::pin::Pin<Box<dyn std::future::Future<Output = JsonValue> + Send>> + Send + Sync>;
 
 /// MCP Server with dual transport.
+#[derive(Clone)]
 pub struct McpServer {
     tools: Arc<RwLock<HashMap<String, ToolHandler>>>,
     auth_token: Arc<RwLock<Option<String>>>,
@@ -94,6 +95,15 @@ impl McpServer {
 
     pub fn total_errors(&self) -> i64 {
         self.total_errors.load(Ordering::Relaxed)
+    }
+
+    pub fn start_time_ms(&self) -> i64 {
+        self.start_time_ms
+    }
+
+    /// Create a cloneable reference for spawning tasks.
+    pub fn clone_ref_public(&self) -> McpServerRef {
+        self.clone_ref()
     }
 
     /// Handle a JSON-RPC request and return a response.
@@ -334,8 +344,9 @@ impl McpServer {
 }
 
 /// Lightweight cloneable reference to McpServer state.
+#[derive(Clone)]
 #[allow(dead_code)]
-struct McpServerRef {
+pub struct McpServerRef {
     tools: Arc<RwLock<HashMap<String, ToolHandler>>>,
     auth_token: Arc<RwLock<Option<String>>>,
     total_requests: Arc<AtomicI64>,
@@ -390,6 +401,32 @@ impl McpServerRef {
             },
             _ => serde_json::json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("Method not found: {}", method) } }),
         }
+    }
+
+    /// Directly invoke a tool by name (for cross-connector bridging).
+    pub async fn invoke_tool(&self, name: &str, args: JsonValue) -> Option<JsonValue> {
+        let tools = self.tools.read().await;
+        if let Some(handler) = tools.get(name) {
+            Some(handler(args).await)
+        } else {
+            None
+        }
+    }
+
+    pub fn connected_client_count(&self) -> usize {
+        self.connected_clients.load(Ordering::Relaxed)
+    }
+
+    pub fn total_requests(&self) -> i64 {
+        self.total_requests.load(Ordering::Relaxed)
+    }
+
+    pub fn total_errors(&self) -> i64 {
+        self.total_errors.load(Ordering::Relaxed)
+    }
+
+    pub fn start_time_ms(&self) -> i64 {
+        self.start_time_ms
     }
 }
 
