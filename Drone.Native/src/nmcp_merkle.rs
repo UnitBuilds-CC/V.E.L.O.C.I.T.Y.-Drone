@@ -17,7 +17,9 @@ pub const NMCP_MERKLE_HEADER_SIZE: usize = 4 + MERKLE_ROOT_SIZE;
 /// NMCP Merkle frame: magic + merkle_root + payload.
 /// The Merkle root is the SHA-256 root of a Merkle tree built over the payload's
 /// constituent record hashes, enabling O(log N) verification.
+/// This struct defines the FFI layout for C# interop.
 #[repr(C)]
+#[allow(dead_code)]
 pub struct NmcpMerkleFrame {
     pub magic: [u8; 4],
     pub merkle_root: [u8; 32],
