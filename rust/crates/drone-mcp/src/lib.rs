@@ -9,4 +9,5 @@ pub mod server;
 pub mod tool_registry;
 
 pub use server::McpServer;
+pub use server::McpServerRef;
 pub use tool_registry::ToolRegistry;

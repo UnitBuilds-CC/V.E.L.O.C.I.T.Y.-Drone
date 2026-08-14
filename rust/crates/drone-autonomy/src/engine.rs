@@ -6,10 +6,14 @@ use drone_core::config::AutonomyConfig;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Callback when an action is executed: (rule_name, event_type, event_data).
+pub type ActionCallback = Arc<dyn Fn(String, String, serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
+
 /// The autonomy engine processes behavior rules in response to events.
 pub struct AutonomyEngine {
     config: AutonomyConfig,
     rules: Arc<RwLock<Vec<BehaviorRule>>>,
+    on_action: Arc<RwLock<Option<ActionCallback>>>,
 }
 
 impl AutonomyEngine {
@@ -17,7 +21,16 @@ impl AutonomyEngine {
         Self {
             config,
             rules: Arc::new(RwLock::new(Vec::new())),
+            on_action: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Set a callback invoked whenever a rule action fires.
+    pub async fn set_on_action_executed<F>(&self, callback: F)
+    where
+        F: Fn(String, String, serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync + 'static,
+    {
+        *self.on_action.write().await = Some(Arc::new(callback));
     }
 
     /// Load rules from the configured path.
@@ -64,13 +77,17 @@ impl AutonomyEngine {
         self.load_rules().await;
 
         let rules = self.rules.clone();
+        let on_action = self.on_action.clone();
         event_bus.subscribe(move |event: DroneEvent| {
             let rules = rules.clone();
+            let on_action = on_action.clone();
             async move {
                 let rules = rules.read().await;
                 for rule in rules.iter().filter(|r| r.matches(&event)) {
-                    tracing::debug!("Rule '{}' triggered by event '{}'", rule.name, event.event_type);
-                    // TODO: Execute action handlers
+                    tracing::info!("[Autonomy] Rule '{}' triggered by event '{}'", rule.name, event.event_type);
+                    if let Some(callback) = on_action.read().await.as_ref() {
+                        callback(rule.name.clone(), event.event_type.clone(), event.data.clone()).await;
+                    }
                 }
             }
         }).await;

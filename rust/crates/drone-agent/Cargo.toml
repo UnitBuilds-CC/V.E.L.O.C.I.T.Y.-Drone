@@ -21,3 +21,5 @@ tracing-subscriber = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = { workspace = true }
 hostname = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
