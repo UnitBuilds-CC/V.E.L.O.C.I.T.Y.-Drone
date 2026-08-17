@@ -26,6 +26,7 @@ public class VelocityConnection : IAsyncDisposable
     private volatile bool _connected;
     private int _reconnectAttempts;
     private Task? _heartbeatTask;
+    private readonly CircuitBreaker _breaker = new(failureThreshold: 5, openTimeout: TimeSpan.FromSeconds(30));
 
     /// <summary>Lock to serialize concurrent WebSocket sends (heartbeat vs response/notification).</summary>
     private readonly SemaphoreSlim _wsSendLock = new(1, 1);
@@ -319,8 +320,17 @@ public class VelocityConnection : IAsyncDisposable
         if (_config.AutoReconnect && !ct.IsCancellationRequested && _reconnectAttempts < _config.MaxReconnectAttempts)
         {
             _reconnectAttempts++;
-            _logger.LogInformation("Connection lost. Reconnect attempt {Attempt}/{Max}...", _reconnectAttempts, _config.MaxReconnectAttempts);
-            await Task.Delay(1000 * _reconnectAttempts, ct);
+            // If circuit breaker is open, wait for recovery before retrying
+            if (_breaker.IsOpen)
+            {
+                _logger.LogWarning("Uplink circuit breaker open. Waiting for recovery...");
+                await Task.Delay(30000, ct);
+            }
+            else
+            {
+                _logger.LogInformation("Connection lost. Reconnect attempt {Attempt}/{Max}...", _reconnectAttempts, _config.MaxReconnectAttempts);
+                await Task.Delay(1000 * _reconnectAttempts, ct);
+            }
             try { await ConnectWebSocketAsync(); }
             catch (Exception ex) { _logger.LogWarning("Reconnect failed: {Error}", ex.Message); }
         }
@@ -364,12 +374,12 @@ public class VelocityConnection : IAsyncDisposable
         // Wait for heartbeat to finish before disposing WebSocket
         if (_heartbeatTask != null)
         {
-            try { await _heartbeatTask; } catch { }
+            try { await _heartbeatTask; } catch { /* heartbeat cancelled during disposal — expected */ }
         }
         if (_ws?.State == WebSocketState.Open)
         {
             try { await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Disposing", CancellationToken.None); }
-            catch { }
+            catch { /* WebSocket may already be faulted — disposing anyway */ }
         }
         _ws?.Dispose();
         _view?.Dispose();

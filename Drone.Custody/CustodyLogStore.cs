@@ -331,7 +331,7 @@ public class CustodyLogStore : IDisposable
         {
             foreach (var writer in _droneWriters.Values)
             {
-                try { writer.Dispose(); } catch { }
+                try { writer.Dispose(); } catch { /* writer may already be disposed */ }
             }
             _droneWriters.Clear();
             _mergedWriter?.Dispose();

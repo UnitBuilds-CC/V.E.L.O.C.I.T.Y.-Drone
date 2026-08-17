@@ -50,14 +50,14 @@ See [Architecture](docs/architecture.md) for the full module map, dependency gra
 | Project | Description |
 |---------|-------------|
 | **Drone.Agent** | Entry point. Tray app, DI wiring, Messenger command handler, MCP server host. Windows-specific (WinForms). |
-| **Drone.Core** | Shared types: `ILogger`, `DroneConfig`, `EventBus`, NMCP binary frame protocol, custody trail primitives. |
+| **Drone.Core** | Shared types: `ILogger`, `DroneConfig`, `EventBus`, `CircuitBreaker`, NMCP binary frame protocol, custody trail primitives. |
 | **Drone.Services** | Connectors: `MessengerConnector`, `RemoteConnector`, `ShareConnector`, `CustodyReporter`, `DeltaScreenPipeline`. |
 | **Drone.MCP** | MCP server: tool registration, JSON-RPC 2.0, WebSocket transport, NMCP buffer management. |
 | **Drone.System** | Platform abstractions: `IScreenCapture`, `IInputSimulator`, `IWindowManager`, `IProcessManager`. Windows/Linux/macOS. |
 | **Drone.Autonomy** | Rule engine: `BehaviorRule` triggers + `ActionHandler` responses. `EventBus`-driven autonomous behavior. |
 | **Drone.Native** | Rust FFI bindings: delta frame serialization, WebP compression, native performance-critical paths. |
 | **Drone.Custody** | Standalone custody server: WebSocket ingestion, hash-chain validation, HTTP query API, real-time stream broadcast. |
-| **Drone.Tests** | xUnit tests: 52 tests covering core protocol, custody trail, MCP server, autonomy engine, event bus. |
+| **Drone.Tests** | xUnit tests: 100 tests covering core protocol, custody trail, circuit breaker, MCP server, autonomy engine, event bus. |
 | **Drone.E2E** | End-to-end integration tests: MCP handshake, WebSocket transport, auth, custody trail pipeline. |
 | **DeltaBench** | Benchmarking project for delta frame serialization and compression performance. |
 
@@ -145,6 +145,7 @@ Edit `Drone.Agent/appsettings.json` or set environment variables:
 | `DRONE_MCP_TOKEN` | MCP auth token |
 | `DRONE_CUSTODY_PATH` | Local custody log file path |
 | `DRONE_CUSTODY_SERVER` | CustodyServer URL for streaming |
+| `DRONE_SHUTDOWN_TIMEOUT` | Graceful shutdown timeout in seconds (default: 15) |
 | `CUSTODY_STORAGE_PATH` | Server-side storage directory |
 | `CUSTODY_LISTEN_URL` | CustodyServer listen URL |
 
@@ -184,7 +185,7 @@ dotnet build Drone.Custody/Drone.Custody.csproj
 ## Testing
 
 ```bash
-# Unit tests (52 tests)
+# Unit tests (100 tests)
 dotnet test tests/Drone.Tests/Drone.Tests.csproj
 
 # E2E integration tests (10 tests + 3 skipped on Windows without admin)
@@ -203,6 +204,7 @@ dotnet run --project tests/Drone.E2E/Drone.E2E.csproj
 | `McpServerTests` | 6 | Tool registration, JSON-RPC protocol, error handling |
 | `BehaviorRuleTests` | 5 | Trigger matching, conditions, action params |
 | `EventBusTests` | 4 | Pub/sub, filtering, error isolation |
+| `CircuitBreakerTests` | 12 | State transitions, thresholds, recovery, async variants |
 | `E2E Tests` | 10 | MCP handshake, tool calls, WebSocket transport, auth, custody trail |
 
 ## Deployment
@@ -225,12 +227,15 @@ See [Deployment Guide](docs/deployment.md) for Docker Compose, systemd, Azure de
 
 | Document | Description |
 |----------|-------------|
+| [User Guide](docs/user-guide.md) | **Start here** — Getting started, commands, tools, workflows, integration examples |
 | [Architecture](docs/architecture.md) | Module map, dependency graph, data flow, threading model |
 | [Custody Trail](docs/custody-trail.md) | Full custody system architecture, API reference, security |
 | [NMCP Protocol](docs/nmcp-protocol.md) | Wire format specification, frame types, connection lifecycle |
 | [Configuration](docs/configuration.md) | Every setting, defaults, environment variables |
 | [Deployment](docs/deployment.md) | Docker, Windows, CustodyServer, Azure, systemd |
 | [Development](docs/development.md) | Building, testing, conventions, debugging, adding tools |
+| [Production Hardening](docs/production-hardening.md) | Circuit breaker, graceful shutdown, security features, health checks |
+| [Troubleshooting](docs/troubleshooting.md) | Common issues, diagnostics, FAQ |
 
 ## Project Structure
 
@@ -249,6 +254,7 @@ Velocity-Drone/
 │   │   └── CustodyAuditLogger.cs
 │   ├── Protocol/           # NMCP binary framing, NDA triples
 │   ├── Config/             # DroneConfig, validation
+│   ├── CircuitBreaker.cs   # Thread-safe circuit breaker (Closed/Open/HalfOpen)
 │   └── VelocityConnection.cs
 ├── Drone.Services/         # Connectors and background services
 │   ├── Messenger/          # MessengerConnector
@@ -268,14 +274,17 @@ Velocity-Drone/
 │   ├── CustodyQueryEngine.cs
 │   └── Program.cs
 ├── tests/
-│   ├── Drone.Tests/        # 52 xUnit tests
+│   ├── Drone.Tests/        # 100 xUnit tests
 │   └── Drone.E2E/          # E2E integration tests
 ├── docs/                   # Documentation
+│   ├── user-guide.md       # **Start here** — end-user guide
 │   ├── architecture.md
 │   ├── custody-trail.md
 │   ├── nmcp-protocol.md
 │   ├── configuration.md
 │   ├── deployment.md
-│   └── development.md
+│   ├── development.md
+│   ├── production-hardening.md
+│   └── troubleshooting.md
 └── DeltaBench/             # Delta frame benchmarks
 ```

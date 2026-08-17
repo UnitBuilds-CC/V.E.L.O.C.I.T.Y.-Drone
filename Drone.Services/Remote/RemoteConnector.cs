@@ -26,6 +26,7 @@ public class RemoteConnector : IAsyncDisposable
     private const int MaxReconnectAttempts = 10;
     private const int HeartbeatIntervalSec = 30;
     private Task? _heartbeatTask;
+    private readonly CircuitBreaker _breaker = new(failureThreshold: 5, openTimeout: TimeSpan.FromSeconds(30));
 
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private static readonly TimeSpan SendTimeout = TimeSpan.FromSeconds(10);
@@ -72,6 +73,13 @@ public class RemoteConnector : IAsyncDisposable
             catch (Exception ex)
             {
                 _connected = false;
+                // If circuit breaker is open, wait for recovery before retrying
+                if (_breaker.IsOpen)
+                {
+                    _logger.LogWarning("Remote circuit breaker open. Waiting for recovery...");
+                    await Task.Delay(30000, _cts.Token);
+                    continue;
+                }
                 if (!_cts.Token.IsCancellationRequested && _reconnectAttempts < MaxReconnectAttempts)
                 {
                     _reconnectAttempts++;
@@ -369,10 +377,11 @@ public class RemoteConnector : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _cts?.Cancel();
-        if (_heartbeatTask != null) { try { await _heartbeatTask; } catch { } }
+        if (_heartbeatTask != null) { try { await _heartbeatTask; } catch { /* heartbeat cancelled during disposal — expected */ } }
         if (_ws?.State == WebSocketState.Open)
         {
-            try { using var c = new CancellationTokenSource(TimeSpan.FromSeconds(2)); await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Disposing", c.Token); } catch { }
+            try { using var c = new CancellationTokenSource(TimeSpan.FromSeconds(2)); await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Disposing", c.Token); }
+            catch { /* WebSocket may already be faulted — disposing anyway */ }
         }
         _ws?.Dispose();
         _sendLock.Dispose();

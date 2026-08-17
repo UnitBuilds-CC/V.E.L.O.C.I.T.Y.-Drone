@@ -11,7 +11,14 @@ Drone.Native/target/
 
 ## Build artifacts
 publish/
+publish-new/
+release-*/
+*.zip
+build-test/
+build-v2/
+build-v3/
 *.nupkg
+installer/*.exe
 
 ## IDE
 .idea/

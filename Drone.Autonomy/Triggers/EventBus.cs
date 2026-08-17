@@ -1,26 +1,36 @@
-﻿namespace Drone.Autonomy;
+namespace Drone.Autonomy;
 
 public class EventBus
 {
-    private readonly List<Func<DroneEvent, Task>> _handlers = new();
+    private readonly List<(string? EventType, Func<DroneEvent, Task> Handler)> _handlers = new();
     private readonly object _lock = new();
 
-    public void Subscribe<T>(Func<DroneEvent, Task> handler) where T : DroneEvent
+    /// <summary>Subscribe to all events.</summary>
+    public void Subscribe(Func<DroneEvent, Task> handler)
     {
-        lock (_lock) { _handlers.Add(handler); }
+        lock (_lock) { _handlers.Add((null, handler)); }
     }
 
+    /// <summary>Subscribe only to events of a specific type.</summary>
+    public void Subscribe(string eventType, Func<DroneEvent, Task> handler)
+    {
+        lock (_lock) { _handlers.Add((eventType, handler)); }
+    }
+
+    /// <summary>Unsubscribe a handler.</summary>
     public void Unsubscribe(Func<DroneEvent, Task> handler)
     {
-        lock (_lock) { _handlers.Remove(handler); }
+        lock (_lock) { _handlers.RemoveAll(h => h.Handler == handler); }
     }
 
+    /// <summary>Publish an event to all matching handlers.</summary>
     public async Task PublishAsync(DroneEvent evt)
     {
-        Func<DroneEvent, Task>[] handlers;
-        lock (_lock) { handlers = _handlers.ToArray(); }
-        foreach (var handler in handlers)
+        (string? EventType, Func<DroneEvent, Task> Handler)[] snapshot;
+        lock (_lock) { snapshot = _handlers.ToArray(); }
+        foreach (var (eventType, handler) in snapshot)
         {
+            if (eventType != null && eventType != evt.Type) continue;
             try { await handler(evt); }
             catch { /* handler errors are non-fatal */ }
         }
@@ -36,22 +46,14 @@ public class DroneEvent
     public DroneEvent(string type, object data) { Type = type; Data = data; }
 }
 
-// â”€â”€ Trigger event types (spec Phase 3) â”€â”€
 public static class DroneEventTypes
 {
-    // Service events
     public const string MessageReceived = "MessageReceived";
     public const string FileChanged = "FileChanged";
     public const string ScreenChanged = "ScreenChanged";
-
-    // Process events
     public const string ProcessStarted = "ProcessStarted";
     public const string ProcessStopped = "ProcessStopped";
-
-    // System events
     public const string SystemAlert = "SystemAlert";
     public const string SystemMetrics = "SystemMetrics";
-
-    // Scheduled
     public const string ScheduledTask = "ScheduledTask";
 }

@@ -129,7 +129,7 @@ public class CustodyServerHost : IAsyncDisposable
         if (reject)
         {
             _logger.LogWarning("Max stream clients reached, rejecting {Addr}", clientAddr);
-            try { await ws.CloseAsync(WebSocketCloseStatus.InternalServerError, "Max connections", CancellationToken.None); } catch { }
+            try { await ws.CloseAsync(WebSocketCloseStatus.InternalServerError, "Max connections", CancellationToken.None); } catch { /* client may have already disconnected */ }
             ws.Dispose();
             return;
         }
@@ -164,7 +164,7 @@ public class CustodyServerHost : IAsyncDisposable
             lock (_clientsLock) _streamClients.Remove(ws);
             if (ws.State == WebSocketState.Open)
             {
-                try { await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Done", CancellationToken.None); } catch { }
+                try { await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Done", CancellationToken.None); } catch { /* client may have already disconnected */ }
             }
             ws.Dispose();
             _logger.LogInformation("Drone disconnected from {Addr}", clientAddr);
@@ -368,12 +368,12 @@ public class CustodyServerHost : IAsyncDisposable
         }
         foreach (var ws in clients)
         {
-            try { await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Shutting down", CancellationToken.None); } catch { }
+            try { await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Shutting down", CancellationToken.None); } catch { /* client may have already disconnected */ }
             ws.Dispose();
         }
 
-        try { _listener?.Stop(); } catch { }
-        try { _listener?.Close(); } catch { }
+        try { _listener?.Stop(); } catch { /* listener may already be stopped */ }
+        try { _listener?.Close(); } catch { /* listener may already be closed */ }
         _cts?.Dispose();
     }
 }

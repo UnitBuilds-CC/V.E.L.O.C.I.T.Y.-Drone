@@ -267,13 +267,13 @@ public class CustodyReporter : IAsyncDisposable
 
         if (_flushTask != null)
         {
-            try { await _flushTask; } catch { }
+            try { await _flushTask; } catch { /* flush task cancelled during disposal — expected */ }
         }
 
         // Final flush
         if (_connected && (_sendFunc != null || _binarySendFunc != null))
         {
-            try { await FlushAsync(CancellationToken.None); } catch { }
+            try { await FlushAsync(CancellationToken.None); } catch { /* final flush failed — non-fatal during disposal */ }
         }
 
         _cts?.Dispose();

@@ -1,4 +1,4 @@
-﻿using global::System.Net.Http.Headers;
+using global::System.Net.Http.Headers;
 using global::System.Net.WebSockets;
 using global::System.Text;
 using global::System.Text.Json;
@@ -24,7 +24,7 @@ public class ShareConnector : IAsyncDisposable
     {
         _config = config;
         _logger = logger;
-        _http = new HttpClient();
+        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
         if (!string.IsNullOrEmpty(config.ServerUrl)) _http.BaseAddress = new Uri(config.ServerUrl);
         _http.DefaultRequestHeaders.Add("X-Api-Key", config.AdminApiKey ?? "");
     }
@@ -37,10 +37,10 @@ public class ShareConnector : IAsyncDisposable
         try
         {
             await _ws.ConnectAsync(new Uri(wsUrl), _cts.Token);
-            _logger.LogInformation("Share notifications connected at " + wsUrl);
+            _logger.LogInformation("Share notifications connected at {Url}", wsUrl);
             _ = Task.Run(() => NotificationLoop(_cts.Token));
         }
-        catch (Exception ex) { _logger.LogWarning("Share notification connection failed: " + ex.Message); }
+        catch (Exception ex) { _logger.LogWarning("Share notification connection failed: {Error}", ex.Message); }
     }
 
     public async Task<bool> UploadFileAsync(string localPath, string remotePath, CancellationToken ct = default)
@@ -56,7 +56,7 @@ public class ShareConnector : IAsyncDisposable
             var response = await _http.PostAsync("/api/files/upload", content, ct);
             return response.IsSuccessStatusCode;
         }
-        catch (Exception ex) { _logger.LogError("Upload failed: " + ex.Message); return false; }
+        catch (Exception ex) { _logger.LogError("Upload failed: {Error}", ex.Message); return false; }
     }
 
     public async Task<bool> DownloadFileAsync(string remotePath, string localPath, CancellationToken ct = default)
@@ -71,7 +71,7 @@ public class ShareConnector : IAsyncDisposable
             await response.Content.CopyToAsync(fs, ct);
             return true;
         }
-        catch (Exception ex) { _logger.LogError("Download failed: " + ex.Message); return false; }
+        catch (Exception ex) { _logger.LogError("Download failed: {Error}", ex.Message); return false; }
     }
 
     public async Task<ShareFileInfo[]> ListFilesAsync(string? path = null, CancellationToken ct = default)
@@ -84,7 +84,7 @@ public class ShareConnector : IAsyncDisposable
             var json = await response.Content.ReadAsStringAsync(ct);
             return JsonSerializer.Deserialize<ShareFileInfo[]>(json) ?? [];
         }
-        catch (Exception ex) { _logger.LogError("List files failed: " + ex.Message); return []; }
+        catch (Exception ex) { _logger.LogError("List files failed: {Error}", ex.Message); return []; }
     }
 
     public async Task<bool> DeleteFileAsync(string remotePath, CancellationToken ct = default)
@@ -94,7 +94,7 @@ public class ShareConnector : IAsyncDisposable
             var response = await _http.DeleteAsync("/api/files/" + Uri.EscapeDataString(remotePath), ct);
             return response.IsSuccessStatusCode;
         }
-        catch (Exception ex) { _logger.LogError("Delete failed: " + ex.Message); return false; }
+        catch (Exception ex) { _logger.LogError("Delete failed: {Error}", ex.Message); return false; }
     }
 
     public async Task<int> SyncFolderAsync(string localFolder, string remoteFolder, CancellationToken ct = default)
@@ -112,20 +112,27 @@ public class ShareConnector : IAsyncDisposable
                 if (await UploadFileAsync(localFile, remotePath, ct)) uploaded++;
             }
         }
-        _logger.LogInformation("Synced " + uploaded + " files from " + localFolder + " to " + remoteFolder);
+        _logger.LogInformation("Synced {Count} files from {Local} to {Remote}", uploaded, localFolder, remoteFolder);
         return uploaded;
     }
 
     private async Task NotificationLoop(CancellationToken ct)
     {
         var buffer = new byte[8192];
+        using var ms = new MemoryStream();
         while (!ct.IsCancellationRequested && _ws?.State == WebSocketState.Open)
         {
             try
             {
-                var result = await _ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
-                if (result.MessageType == WebSocketMessageType.Close) break;
-                var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                ms.SetLength(0);
+                WebSocketReceiveResult result;
+                do
+                {
+                    result = await _ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
+                    if (result.MessageType == WebSocketMessageType.Close) return;
+                    ms.Write(buffer, 0, result.Count);
+                } while (!result.EndOfMessage);
+                var json = Encoding.UTF8.GetString(ms.ToArray());
                 using var doc = JsonDocument.Parse(json);
                 var root = doc.RootElement;
                 if (root.TryGetProperty("path", out var pathProp) && root.TryGetProperty("changeType", out var ctProp))
@@ -134,7 +141,7 @@ public class ShareConnector : IAsyncDisposable
                 }
             }
             catch (OperationCanceledException) { break; }
-            catch (Exception ex) { _logger.LogWarning("Share notification error: " + ex.Message); }
+            catch (Exception ex) { _logger.LogWarning("Share notification error: {Error}", ex.Message); }
         }
     }
 
@@ -144,7 +151,7 @@ public class ShareConnector : IAsyncDisposable
         if (_ws?.State == WebSocketState.Open)
         {
             try { await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Disposing", CancellationToken.None); }
-            catch { }
+            catch { /* WebSocket may already be faulted — disposing anyway */ }
         }
         _ws?.Dispose();
         _cts?.Dispose();
