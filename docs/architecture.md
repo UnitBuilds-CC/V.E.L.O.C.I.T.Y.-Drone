@@ -78,16 +78,17 @@ Zero-dependency foundation layer. Contains:
 - **NMCP protocol** — Binary frame format (16-byte header, big-endian), frame type registry
 - **`VelocityConnection`** — WebSocket connection with NMCP buffer management
 - **Custody primitives** — `CustodyRecord`, `CustodyChain`, `CorrelationTracker`, `CustodyAuditLogger`
+- **`CircuitBreaker`** — Thread-safe circuit breaker (Closed/Open/HalfOpen) for connector resilience
 
 ### Drone.Services (Connectors & Background Services)
 
-Network connectors and background services:
-- **`MessengerConnector`** — WebSocket connection to Velocity Messenger for command reception
-- **`RemoteConnector`** — NMCP/NDA connection for remote tool execution (with custody logging)
-- **`ShareConnector`** — HTTP/WebSocket connection to Share server for file operations
+Network connectors and background services. All connectors integrate `CircuitBreaker` for cascading failure protection:
+- **`MessengerConnector`** — WebSocket connection to Velocity Messenger for command reception (30s HttpClient timeout, circuit breaker)
+- **`RemoteConnector`** — NMCP/NDA connection for remote tool execution with custody logging (circuit breaker)
+- **`ShareConnector`** — HTTP/WebSocket connection to Share server for file operations (30s HttpClient timeout)
 - **`CustodyReporter`** — Background service batching custody records for streaming
-- **`DeltaScreenPipeline`** — Delta frame screen capture pipeline
-- **`EmbeddedFileServer`** — Lightweight HTTP file server for shared files
+- **`DeltaScreenPipeline`** — Zero-alloc delta frame screen capture pipeline
+- **`EmbeddedFileServer`** — Lightweight HTTP file server with path traversal protection
 
 ### Drone.MCP (MCP Server)
 
@@ -95,7 +96,8 @@ Model Context Protocol implementation:
 - **Tool registration** — `SystemToolRegistrar` registers platform tools
 - **JSON-RPC 2.0** — Request/response/notification handling
 - **NMCP framing** — Binary frame wrapping for tool calls/results
-- **WebSocket transport** — Client connections over WebSocket
+- **WebSocket transport** — Client connections with bearer token auth, rate limiting, max message size enforcement
+- **Health endpoint** — `/health` with connection status, custody chain, uptime metrics
 - **Buffer management** — File-backed NMCP buffer for offline resilience
 
 ### Drone.System (Platform Abstractions)

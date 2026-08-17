@@ -1,0 +1,61 @@
+[app]
+name = "Velocity Drone Agent"
+version = "3.0.0"
+publisher = "Velocity"
+description = "Autonomous drone agent for the Velocity ecosystem. Connects to Messenger, Share, and Remote servers."
+url = "https://velocity.unitbuilds.com"
+
+[install]
+default_dir = "C:\\Drone"
+start_menu = "Velocity Drone"
+require_admin = true
+close_app_before_install = true
+run_after_install = "run-drone.bat"
+
+[files]
+source = [
+    "./velocity-drone.exe",
+    "./appsettings.json",
+    "./run-drone.bat",
+]
+exclude = [
+    "*.pdb",
+]
+
+[shortcuts]
+desktop = true
+start_menu = true
+
+[ui]
+theme = "modern"
+
+[scripts]
+pre_install = []
+post_install = [
+    "netsh http add urlacl url=http://+:9100/ user=Everyone listen=yes",
+    "netsh http add urlacl url=http://+:5003/ user=Everyone listen=yes",
+    "echo Port 9100 reserved for MCP WebSocket server.",
+    "echo Port 5003 reserved for File Server.",
+    "echo Velocity Drone Agent installed successfully!",
+    "echo The drone will appear in the system tray."
+]
+pre_uninstall = []
+post_uninstall = []
+
+[[env_vars]]
+name = "VELOCITY_DRONE_HOME"
+value = "{app}"
+scope = "user"
+delete_on_uninstall = true
+
+[[components]]
+id = "core"
+name = "Drone Agent"
+description = "Core drone agent executable and configuration"
+selected_by_default = true
+mandatory = true
+
+[uninstall]
+add_remove = true
+help_url = "https://velocity.unitbuilds.com/docs"
+update_url = "https://velocity.unitbuilds.com/updates"

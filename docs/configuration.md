@@ -214,6 +214,18 @@ docker run -d \
 - `Mode` must be `Full` or `Headless` (case-insensitive)
 - `Uplink.BufferSize` must be > 0
 - `Mcp.BufferSize` must be > 0
+- `ScheduledTaskPollSec` must be >= 0
+- `Autonomy.RulesPath` must be set if autonomy is enabled
 - URLs must be valid if provided
 
 Invalid configuration throws an exception at startup — the agent will not start with bad config.
+
+## Production Hardening Settings
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| Shutdown timeout | `DRONE_SHUTDOWN_TIMEOUT` | `15` | Seconds allowed for graceful disposal before forced exit |
+| Custody path | `DRONE_CUSTODY_PATH` | — | Persistent custody trail file path |
+| MCP auth token | `DRONE_MCP_TOKEN` | — | Bearer token for MCP WebSocket authentication |
+| Install directory | `DRONE_INSTALL_DIR` | AppContext.BaseDirectory | Base directory for self-update operations |
+| Update script | `DRONE_UPDATE_SCRIPT` | `update-drone.bat` | Path to update script for self-update |

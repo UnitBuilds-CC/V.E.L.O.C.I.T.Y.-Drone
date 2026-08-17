@@ -1,4 +1,6 @@
-﻿namespace Drone.Core.Config;
+using global::System.Text.Json;
+
+namespace Drone.Core.Config;
 
 /// <summary>
 /// Master configuration for the Velocity Drone agent.
@@ -6,7 +8,7 @@
 /// </summary>
 public class DroneConfig
 {
-    /// <summary>Drone identity â€” username when connecting to services.</summary>
+    /// <summary>Drone identity — username when connecting to services.</summary>
     public string DroneId { get; set; } = "Drone";
 
     /// <summary>Operating mode: full (screen+input+services) or headless (services only).</summary>
@@ -26,6 +28,37 @@ public class DroneConfig
 
     /// <summary>Autonomy engine settings.</summary>
     public AutonomyConfig Autonomy { get; set; } = new();
+
+    /// <summary>MCP server settings.</summary>
+    public McpConfig Mcp { get; set; } = new();
+
+    /// <summary>
+    /// Validates all config sections. Throws InvalidOperationException if any section is invalid.
+    /// </summary>
+    public void Validate()
+    {
+        if (string.IsNullOrWhiteSpace(DroneId))
+            throw new InvalidOperationException("DroneId must not be empty");
+        Uplink.Validate();
+        Messenger.Validate();
+        Share.Validate();
+        Remote.Validate();
+        Autonomy.Validate();
+        Mcp.Validate();
+    }
+
+    public static DroneConfig Load(string path)
+    {
+        if (!File.Exists(path)) return new DroneConfig();
+        var json = File.ReadAllText(path);
+        return JsonSerializer.Deserialize<DroneConfig>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new DroneConfig();
+    }
+
+    public void Save(string path)
+    {
+        var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
+        File.WriteAllText(path, json);
+    }
 }
 
 public enum DroneMode
@@ -55,6 +88,19 @@ public class UplinkConfig
 
     /// <summary>Max reconnect attempts before giving up.</summary>
     public int MaxReconnectAttempts { get; set; } = 10;
+
+    public void Validate()
+    {
+        if (BufferSize <= 0 || BufferSize > 64 * 1024 * 1024)
+            throw new InvalidOperationException($"Uplink.BufferSize must be between 1 and 67108864 (64MB), got {BufferSize}");
+
+        if (Transport != "auto" && Transport != "websocket" && Transport != "shmem")
+            throw new InvalidOperationException($"Uplink.Transport must be 'auto', 'websocket', or 'shmem', got '{Transport}'");
+
+        if ((Transport == "websocket" || Transport == "auto") && !string.IsNullOrEmpty(WebSocketUrl) &&
+            !Uri.TryCreate(WebSocketUrl, UriKind.Absolute, out _))
+            throw new InvalidOperationException($"Uplink.WebSocketUrl is not a valid URI: '{WebSocketUrl}'");
+    }
 }
 
 public class MessengerConfig
@@ -67,10 +113,19 @@ public class MessengerConfig
 
     /// <summary>Enable auto-reconnect.</summary>
     public bool AutoReconnect { get; set; } = true;
+
+    public void Validate()
+    {
+        if (!string.IsNullOrEmpty(ServerUrl) && !Uri.TryCreate(ServerUrl, UriKind.Absolute, out _))
+            throw new InvalidOperationException($"Messenger.ServerUrl is not a valid URI: '{ServerUrl}'");
+    }
 }
 
 public class ShareConfig
 {
+    /// <summary>Whether the share server is enabled.</summary>
+    public bool Enabled { get; set; }
+
     /// <summary>Share server base URL (e.g. http://host:5002).</summary>
     public string? ServerUrl { get; set; }
 
@@ -79,6 +134,12 @@ public class ShareConfig
 
     /// <summary>WebSocket token for real-time sync.</summary>
     public string? WebSocketToken { get; set; }
+
+    public void Validate()
+    {
+        if (!string.IsNullOrEmpty(ServerUrl) && !Uri.TryCreate(ServerUrl, UriKind.Absolute, out _))
+            throw new InvalidOperationException($"Share.ServerUrl is not a valid URI: '{ServerUrl}'");
+    }
 }
 
 public class RemoteConfig
@@ -88,6 +149,12 @@ public class RemoteConfig
 
     /// <summary>API key for authentication.</summary>
     public string? ApiKey { get; set; }
+
+    public void Validate()
+    {
+        if (!string.IsNullOrEmpty(ServerUrl) && !Uri.TryCreate(ServerUrl, UriKind.Absolute, out _))
+            throw new InvalidOperationException($"Remote.ServerUrl is not a valid URI: '{ServerUrl}'");
+    }
 }
 
 public class AutonomyConfig
@@ -109,4 +176,35 @@ public class AutonomyConfig
 
     /// <summary>Scheduled task poll interval in seconds (0 = disabled).</summary>
     public int ScheduledTaskPollSec { get; set; } = 60;
+
+    public void Validate()
+    {
+        if (ScreenMonitorIntervalSec < 0)
+            throw new InvalidOperationException($"Autonomy.ScreenMonitorIntervalSec must be >= 0, got {ScreenMonitorIntervalSec}");
+        if (SystemMetricsIntervalSec < 0)
+            throw new InvalidOperationException($"Autonomy.SystemMetricsIntervalSec must be >= 0, got {SystemMetricsIntervalSec}");
+        if (ProcessMonitorIntervalSec < 0)
+            throw new InvalidOperationException($"Autonomy.ProcessMonitorIntervalSec must be >= 0, got {ProcessMonitorIntervalSec}");
+        if (ScheduledTaskPollSec < 0)
+            throw new InvalidOperationException($"Autonomy.ScheduledTaskPollSec must be >= 0, got {ScheduledTaskPollSec}");
+        if (Enabled && string.IsNullOrWhiteSpace(RulesPath))
+            throw new InvalidOperationException("Autonomy.RulesPath must not be empty when Autonomy is enabled");
+    }
+}
+
+public class McpConfig
+{
+    /// <summary>Path to shared memory buffer for MCP NMCP protocol.</summary>
+    public string BufferPath { get; set; } = "nmcp_mcp.bin";
+
+    /// <summary>Buffer size in bytes (default 1MB).</summary>
+    public int BufferSize { get; set; } = 1048576;
+
+    public void Validate()
+    {
+        if (string.IsNullOrWhiteSpace(BufferPath))
+            throw new InvalidOperationException("Mcp.BufferPath must not be empty");
+        if (BufferSize <= 0 || BufferSize > 64 * 1024 * 1024)
+            throw new InvalidOperationException($"Mcp.BufferSize must be between 1 and 67108864 (64MB), got {BufferSize}");
+    }
 }

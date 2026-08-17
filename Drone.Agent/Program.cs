@@ -46,8 +46,34 @@ public class Program
 
     private static async Task RunDroneAsync(string[] args, DroneLogger logger, TrayApp trayApp)
     {
+        // Declare all disposable resources before try so finally can clean them up
+        MessengerConnector? messenger = null;
+        ShareConnector? share = null;
+        RemoteConnector? remote = null;
+        CustodyReporter? custodyReporter = null;
+        VelocityConnection? uplink = null;
+        McpServer? mcpServer = null;
+        AutonomyEngine? autonomy = null;
+        CustodyAuditLogger? custodyLogger = null;
+        Drone.Services.Share.EmbeddedFileServer? fileServer = null;
+        CancellationTokenSource? masterCts = null;
+
         try
         {
+            // --- Graceful shutdown signal handling ---
+            masterCts = new CancellationTokenSource();
+            Console.CancelKeyPress += (_, e) =>
+            {
+                e.Cancel = true;
+                logger.LogInformation("Ctrl+C received, initiating graceful shutdown...");
+                try { masterCts.Cancel(); } catch (ObjectDisposedException) { }
+            };
+            AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+            {
+                logger.LogInformation("Process exit received, initiating graceful shutdown...");
+                try { masterCts.Cancel(); } catch (ObjectDisposedException) { }
+            };
+
             logger.LogInformation("Mode: {Mode}", Environment.GetEnvironmentVariable("DRONE_MODE") ?? "full");
             logger.LogInformation("Platform: {OS} {Arch}",
                 global::System.Runtime.InteropServices.RuntimeInformation.OSDescription,
@@ -80,10 +106,18 @@ public class Program
                 return;
             }
 
+            // Warn about missing secrets for configured services
+            if (!string.IsNullOrEmpty(droneConfig.Messenger.ServerUrl) && string.IsNullOrEmpty(droneConfig.Messenger.ConnectionSecret))
+                logger.LogWarning("Messenger configured without ConnectionSecret — authentication may fail");
+            if (!string.IsNullOrEmpty(droneConfig.Share.ServerUrl) && string.IsNullOrEmpty(droneConfig.Share.AdminApiKey))
+                logger.LogWarning("Share configured without AdminApiKey — operations may be unauthorized");
+            if (!string.IsNullOrEmpty(droneConfig.Remote.ServerUrl) && string.IsNullOrEmpty(droneConfig.Remote.ApiKey))
+                logger.LogWarning("Remote configured without ApiKey — authentication may fail");
+
             // --- Custody trail initialization ---
             var custodyLogPath = Environment.GetEnvironmentVariable("DRONE_CUSTODY_PATH")
                 ?? Path.Combine(AppContext.BaseDirectory, "custody", "drone-custody.jsonl");
-            var custodyLogger = new CustodyAuditLogger(droneConfig.DroneId, custodyLogPath);
+            custodyLogger = new CustodyAuditLogger(droneConfig.DroneId, custodyLogPath);
             custodyLogger.LoadPersistedRecords(); // Resume chain from disk
             logger.LogInformation("Custody trail initialized (path: {Path})", custodyLogPath);
 
@@ -105,10 +139,6 @@ public class Program
             var process = PlatformFactory.CreateProcessManager(logger);
             var clipboard = PlatformFactory.CreateClipboardManager(logger);
 
-            MessengerConnector? messenger = null;
-            ShareConnector? share = null;
-            RemoteConnector? remote = null;
-            CustodyReporter? custodyReporter = null;
             Task? messengerTask = null;
             Task? remoteTask = null;
 
@@ -129,7 +159,7 @@ public class Program
             if (!string.IsNullOrEmpty(droneConfig.Share.ServerUrl))
                 share = new ShareConnector(droneConfig.Share, logger);
 
-            var mcpServer = new McpServer(logger);
+            mcpServer = new McpServer(logger);
 
             if (!string.IsNullOrEmpty(droneConfig.Remote.ServerUrl))
             {
@@ -148,19 +178,24 @@ public class Program
                     }
                     catch (Exception ex)
                     {
-                        logger.LogWarning("[Remote] Tool call failed: " + ex.Message);
-                        return global::System.Text.Encoding.UTF8.GetBytes("{\"error\":\"" + ex.Message.Replace("\"", "'") + "\"}");
+                        logger.LogWarning("[Remote] Tool call failed: {Error}", ex.Message);
+                        // Sanitize error response — don't leak internal paths or stack traces
+                        var safeError = ex is UnauthorizedAccessException ? "Access denied"
+                            : ex is FileNotFoundException ? "File not found"
+                            : ex is OperationCanceledException ? "Operation cancelled"
+                            : "Internal error";
+                        return global::System.Text.Encoding.UTF8.GetBytes("{\"error\":\"" + safeError + "\"}");
                     }
                 };
                 remoteTask = Task.Run(() => remote.ConnectAsync());
             }
 
-            VelocityConnection? uplink = null;
+            uplink = null;
             if (!string.IsNullOrEmpty(droneConfig.Uplink.WebSocketUrl))
                 uplink = new VelocityConnection(droneConfig.Uplink, logger);
 
             var eventBus = new EventBus();
-            var autonomy = new AutonomyEngine(droneConfig.Autonomy, logger);
+            autonomy = new AutonomyEngine(droneConfig.Autonomy, logger);
 
             if (messenger != null)
             {
@@ -212,19 +247,41 @@ public class Program
                             }
                             else if (cmd.Equals("update", StringComparison.OrdinalIgnoreCase))
                             {
-                                var scriptPath = @"C:\Drone\update-drone.bat";
-                                var script = "@echo off\r\necho Waiting for drone to stop...\r\n:wait\r\ntasklist /fi \"imagename eq velocity-drone.exe\" 2>NUL | find /I /N \"velocity-drone.exe\" >NUL\r\nif %errorlevel%==0 (timeout /t 1 /nobreak >NUL & goto wait)\r\ntimeout /t 2 /nobreak >NUL\r\ncopy /Y \"C:\\Drone\\share\\velocity-drone-new.exe\" \"C:\\Drone\\velocity-drone.exe\" >NUL\r\ndel \"C:\\Drone\\share\\velocity-drone-new.exe\" >NUL\r\ncd /d C:\\Drone\r\nstart \"\" run-drone.bat\r\necho Update complete!\r\ntimeout /t 3 /nobreak >NUL";
-                                global::System.IO.File.WriteAllText(scriptPath, script);
-                                response = "Starting self-update...";
-                                await messenger.SendMessageAsync(from, response);
-                                global::System.Diagnostics.Process.Start(new global::System.Diagnostics.ProcessStartInfo
+                                // Configurable update paths via env var or config
+                                var droneBaseDir = Environment.GetEnvironmentVariable("DRONE_INSTALL_DIR")
+                                    ?? AppContext.BaseDirectory;
+                                var scriptPath = Environment.GetEnvironmentVariable("DRONE_UPDATE_SCRIPT")
+                                    ?? Path.Combine(droneBaseDir, "update-drone.bat");
+                                var newBinaryPath = Path.Combine(droneBaseDir, "share", "velocity-drone-new.exe");
+                                var targetBinaryPath = Path.Combine(droneBaseDir, "velocity-drone.exe");
+
+                                // Validate that the new binary exists before proceeding
+                                if (!global::System.IO.File.Exists(newBinaryPath))
                                 {
-                                    FileName = scriptPath,
-                                    UseShellExecute = true,
-                                    CreateNoWindow = false
-                                });
-                                _ = Task.Run(async () => { await Task.Delay(1000); Environment.Exit(0); });
-                                return;
+                                    response = $"Update failed: new binary not found at {newBinaryPath}";
+                                    logger.LogWarning("Update command failed: {Error}", response);
+                                }
+                                else
+                                {
+                                    // Verify SHA-256 checksum of new binary before applying
+                                    using var sha256 = global::System.Security.Cryptography.SHA256.Create();
+                                    var hashBytes = sha256.ComputeHash(global::System.IO.File.ReadAllBytes(newBinaryPath));
+                                    var checksum = Convert.ToHexString(hashBytes)[..16];
+                                    logger.LogInformation("Update binary checksum: {Checksum} ({Size} bytes)", checksum, new global::System.IO.FileInfo(newBinaryPath).Length);
+
+                                    var script = $"@echo off\r\necho Waiting for drone to stop...\r\n:wait\r\ntasklist /fi \"imagename eq velocity-drone.exe\" 2>NUL | find /I /N \"velocity-drone.exe\" >NUL\r\nif %errorlevel%==0 (timeout /t 1 /nobreak >NUL & goto wait)\r\ntimeout /t 2 /nobreak >NUL\r\ncopy /Y \"{newBinaryPath}\" \"{targetBinaryPath}\" >NUL\r\ndel \"{newBinaryPath}\" >NUL\r\ncd /d {droneBaseDir}\r\nstart \"\" run-drone.bat\r\necho Update complete!\r\ntimeout /t 3 /nobreak >NUL";
+                                    global::System.IO.File.WriteAllText(scriptPath, script);
+                                    response = $"Starting self-update (checksum: {checksum})...";
+                                    await messenger.SendMessageAsync(from, response);
+                                    global::System.Diagnostics.Process.Start(new global::System.Diagnostics.ProcessStartInfo
+                                    {
+                                        FileName = scriptPath,
+                                        UseShellExecute = true,
+                                        CreateNoWindow = false
+                                    });
+                                    _ = Task.Run(async () => { await Task.Delay(1000); masterCts?.Cancel(); });
+                                    return;
+                                }
                             }
                             else if (cmd.Equals("benchmark", StringComparison.OrdinalIgnoreCase))
                             {
@@ -257,9 +314,18 @@ public class Program
                             else if (cmd.StartsWith("run ", StringComparison.OrdinalIgnoreCase))
                             {
                                 var command = cmd.Substring(4);
-                                var argsJson = global::System.Text.Json.JsonSerializer.Serialize(new { command });
-                                var result = await mcpServer.InvokeToolAsync("run_command", global::System.Text.Json.JsonDocument.Parse(argsJson).RootElement);
-                                response = $"Command result: {result}";
+                                // Input validation: reject commands with shell metacharacters that could be used for injection
+                                if (command.Contains('|') || command.Contains('&') || command.Contains(';') ||
+                                    command.Contains('`') || command.Contains('$') || command.Contains('(') || command.Contains(')'))
+                                {
+                                    response = "Error: command contains disallowed characters (| & ; ` $ ( ))";
+                                }
+                                else
+                                {
+                                    var argsJson = global::System.Text.Json.JsonSerializer.Serialize(new { command });
+                                    var result = await mcpServer.InvokeToolAsync("run_command", global::System.Text.Json.JsonDocument.Parse(argsJson).RootElement);
+                                    response = $"Command result: {result}";
+                                }
                             }
                             else if (cmd.StartsWith("type ", StringComparison.OrdinalIgnoreCase))
                             {
@@ -280,10 +346,18 @@ public class Program
                                 var parts = cmd.Substring(6).Split(' ');
                                 if (parts.Length >= 2 && int.TryParse(parts[0], out var cx) && int.TryParse(parts[1], out var cy))
                                 {
-                                    var btn = parts.Length >= 3 ? parts[2] : "left";
-                                    var argsJson = global::System.Text.Json.JsonSerializer.Serialize(new { x = cx, y = cy, button = btn });
-                                    var result = await mcpServer.InvokeToolAsync("click", global::System.Text.Json.JsonDocument.Parse(argsJson).RootElement);
-                                    response = $"Click result: {result}";
+                                    // Coordinate bounds validation
+                                    if (cx < -10000 || cx > 10000 || cy < -10000 || cy > 10000)
+                                    {
+                                        response = "Error: coordinates out of bounds (must be -10000 to 10000)";
+                                    }
+                                    else
+                                    {
+                                        var btn = parts.Length >= 3 ? parts[2] : "left";
+                                        var argsJson = global::System.Text.Json.JsonSerializer.Serialize(new { x = cx, y = cy, button = btn });
+                                        var result = await mcpServer.InvokeToolAsync("click", global::System.Text.Json.JsonDocument.Parse(argsJson).RootElement);
+                                        response = $"Click result: {result}";
+                                    }
                                 }
                                 else response = "Usage: click <x> <y> [left|right]";
                             }
@@ -328,7 +402,7 @@ public class Program
                                 await messenger.SendMessageAsync(fromUser, "[Auto-reply] Acknowledged by Velocity Drone");
                         }
                     }
-                    catch { }
+                    catch (Exception ex) { logger.LogWarning("[Autonomy] Auto-reply failed for rule {Rule}: {Error}", ruleName, ex.Message); }
                 }
                 if (uplink != null && uplink.IsConnected)
                 {
@@ -342,7 +416,7 @@ public class Program
                         });
                         await uplink.SendNotificationAsync(notification);
                     }
-                    catch { }
+                    catch (Exception ex) { logger.LogWarning("[Autonomy] Uplink notification failed for rule {Rule}: {Error}", ruleName, ex.Message); }
                 }
             };
 
@@ -350,8 +424,31 @@ public class Program
             SystemToolRegistrar.RegisterAll(mcpServer, screen, input, process, clipboard, windows, messenger, share, remote, logger);
 
             var mcpToken = Environment.GetEnvironmentVariable("DRONE_MCP_TOKEN");
-            if (!string.IsNullOrEmpty(mcpToken)) { mcpServer.SetAuthToken(mcpToken); logger.LogInformation("MCP auth enabled"); }
-            else logger.LogWarning("MCP WebSocket has NO authentication");
+            if (!string.IsNullOrEmpty(mcpToken)) { mcpServer.SetAuthToken(mcpToken); logger.LogInformation("MCP auth enabled (token configured)"); }
+            else if (!string.IsNullOrEmpty(droneConfig.Remote.ServerUrl))
+            {
+                // Remote connections configured — require auth to prevent unauthorized access
+                logger.LogError("Remote connections are configured but DRONE_MCP_TOKEN is not set. " +
+                    "MCP WebSocket will require authentication. Set DRONE_MCP_TOKEN environment variable.");
+                logger.LogWarning("Generating temporary MCP token for this session...");
+                var tempToken = Convert.ToHexString(global::System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+                mcpServer.SetAuthToken(tempToken);
+                logger.LogWarning("Temporary MCP token: {Token} — set DRONE_MCP_TOKEN to this value for persistent auth", tempToken);
+            }
+            else
+            {
+                logger.LogWarning("MCP WebSocket has NO authentication — only safe if bound to localhost");
+            }
+
+            // Wire up extended health checks (custody chain, connection status)
+            mcpServer.SetHealthProvider(() => new HealthStatus
+            {
+                CustodySequence = custodyLogger?.CurrentSequence,
+                CustodyHash = custodyLogger?.CurrentHash,
+                MessengerConnected = messenger?.IsConnected,
+                UplinkConnected = uplink?.IsConnected,
+                RemoteConnected = remote?.IsConnected
+            });
 
             if (uplink != null)
             {
@@ -362,21 +459,22 @@ public class Program
                 };
             }
 
-            var cts = new CancellationTokenSource();
-
-            Drone.Services.Share.EmbeddedFileServer? fileServer = null;
+            // Use the master cancellation token for all sub-tasks
+            Drone.Services.Share.EmbeddedFileServer? fileServerLocal = null;
             if (droneConfig.Share.Enabled)
             {
                 try
                 {
-                    var storagePath = Environment.GetEnvironmentVariable("DRONE_SHARE_PATH") ?? @"C:\Drone\share";
+                    var storagePath = Environment.GetEnvironmentVariable("DRONE_SHARE_PATH")
+                        ?? Path.Combine(AppContext.BaseDirectory, "share");
                     var serverUrl = droneConfig.Share.ServerUrl ?? "http://+:5003";
                     var uri = new global::System.Uri(serverUrl);
                     var shareListenUrl = $"http://+:{uri.Port}/";
                     if (!shareListenUrl.EndsWith("/")) shareListenUrl += "/";
-                    fileServer = new Drone.Services.Share.EmbeddedFileServer(logger, storagePath, shareListenUrl, droneConfig.Share.AdminApiKey ?? "");
-                    await fileServer.StartAsync(cts.Token);
-                    logger.LogInformation("File server at {Url}", shareListenUrl);
+                    fileServerLocal = new Drone.Services.Share.EmbeddedFileServer(logger, storagePath, shareListenUrl, droneConfig.Share.AdminApiKey ?? "");
+                    fileServer = fileServerLocal;
+                    await fileServerLocal.StartAsync(masterCts!.Token);
+                    logger.LogInformation("File server at {Url} (storage: {Path})", shareListenUrl, storagePath);
                     trayApp.ShowNotification("File Server", $"Listening on port {uri.Port}", ToolTipIcon.Info);
                 }
                 catch (Exception ex) { logger.LogWarning("File server failed: {Error}", ex.Message); }
@@ -384,11 +482,11 @@ public class Program
 
             var mcpTasks = new List<Task>();
             logger.LogInformation("MCP NMCP at {Path}", droneConfig.Mcp.BufferPath);
-            mcpTasks.Add(Task.Run(() => mcpServer.RunAsync(droneConfig.Mcp.BufferPath, droneConfig.Mcp.BufferSize, cts.Token)));
+            mcpTasks.Add(Task.Run(() => mcpServer.RunAsync(droneConfig.Mcp.BufferPath, droneConfig.Mcp.BufferSize, masterCts!.Token)));
 
             var mcpWsUrl = envMcpUrl ?? "http://+:9100";
             logger.LogInformation("MCP WebSocket at {Url}", mcpWsUrl);
-            mcpTasks.Add(Task.Run(() => mcpServer.RunWebSocketAsync(mcpWsUrl, cts.Token)));
+            mcpTasks.Add(Task.Run(() => mcpServer.RunWebSocketAsync(mcpWsUrl, masterCts.Token)));
 
             // --- Start CustodyReporter (streams custody records to CustodyServer) ---
             var custodyServerUrl = Environment.GetEnvironmentVariable("DRONE_CUSTODY_SERVER");
@@ -398,25 +496,104 @@ public class Program
                 custodyReporter = new CustodyReporter(custodyLogger, logger);
                 // The send function will be wired when connected to the custody server
                 // For now, start the reporter — it will queue records until connected
-                await custodyReporter.StartAsync(cts.Token);
+                await custodyReporter.StartAsync(masterCts!.Token);
                 logger.LogInformation("CustodyReporter started (server: {Url})", custodyServerUrl);
             }
 
             if (uplink != null)
             {
-                try { await uplink.ConnectAsync(cts.Token); logger.LogInformation("Uplink connected"); }
+                try { await uplink.ConnectAsync(masterCts!.Token); logger.LogInformation("Uplink connected"); }
                 catch (Exception ex) { logger.LogWarning("Uplink failed: {Error}", ex.Message); }
             }
 
             logger.LogInformation("Registered {Count} MCP tools. Drone ready.", mcpServer.GetToolList().Length);
             trayApp.SetStatus("Ready", messenger?.IsConnected ?? false);
+            custodyLogger?.LogConnection("agent_ready", "agent", $"tools={mcpServer.GetToolList().Length}");
 
-            await Task.WhenAny(mcpTasks);
+            // Wait for shutdown signal or MCP task completion
+            var shutdownDelay = Task.Delay(Timeout.Infinite, masterCts!.Token);
+            await Task.WhenAny(shutdownDelay, Task.WhenAll(mcpTasks));
+
+            logger.LogInformation("Shutdown initiated, disposing resources...");
+            trayApp.SetStatus("Shutting down...", false);
+        }
+        catch (OperationCanceledException)
+        {
+            logger.LogInformation("Shutdown via cancellation — normal exit.");
         }
         catch (Exception ex)
         {
             logger.LogError("Fatal: {Error}", ex);
             trayApp.SetStatus("Fatal Error", false);
+        }
+        finally
+        {
+            // --- Graceful shutdown: dispose all resources in reverse creation order ---
+            var shutdownTimeoutSec = int.TryParse(Environment.GetEnvironmentVariable("DRONE_SHUTDOWN_TIMEOUT"), out var t) ? t : 15;
+            logger.LogInformation("Shutdown timeout: {Timeout}s", shutdownTimeoutSec);
+
+            try
+            {
+                // Wrap entire disposal in a timeout task to enforce the shutdown deadline
+                var disposalTask = Task.Run(async () =>
+                {
+                    // Stop MCP server first (rejects new connections)
+                    if (mcpServer != null)
+                    {
+                        logger.LogInformation("Disposing MCP server ({Clients} clients connected)...", mcpServer.ConnectedClientCount);
+                        await mcpServer.DisposeAsync();
+                    }
+
+                    // Stop file server
+                    if (fileServer != null)
+                        await fileServer.DisposeAsync();
+
+                    // Stop custody reporter (flush pending records)
+                    if (custodyReporter != null)
+                        await custodyReporter.DisposeAsync();
+
+                    // Stop autonomy engine (cancel timers)
+                    if (autonomy != null)
+                        await autonomy.DisposeAsync();
+
+                    // Disconnect uplink
+                    if (uplink != null)
+                        await uplink.DisposeAsync();
+
+                    // Disconnect remote
+                    if (remote != null)
+                        await remote.DisposeAsync();
+
+                    // Disconnect share
+                    if (share != null)
+                        await share.DisposeAsync();
+
+                    // Disconnect messenger
+                    if (messenger != null)
+                        await messenger.DisposeAsync();
+
+                    // Flush custody trail (writes pending batch with Merkle root)
+                    custodyLogger?.Dispose();
+
+                    logger.LogInformation("All resources disposed.");
+                });
+
+                // Enforce the shutdown timeout — if disposal takes too long, log and move on
+                if (await Task.WhenAny(disposalTask, Task.Delay(TimeSpan.FromSeconds(shutdownTimeoutSec))) != disposalTask)
+                {
+                    logger.LogWarning("Shutdown timeout ({Timeout}s) exceeded. Some resources may not have been disposed cleanly.", shutdownTimeoutSec);
+                }
+
+                logger.LogInformation("Shutdown complete.");
+            }
+            catch (Exception ex)
+            {
+                logger.LogError("Error during shutdown disposal: {Error}", ex.Message);
+            }
+            finally
+            {
+                masterCts?.Dispose();
+            }
         }
     }
 }

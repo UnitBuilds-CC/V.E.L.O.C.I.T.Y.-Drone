@@ -297,10 +297,10 @@ public class CustodyAuditLogger : IDisposable
                 .Skip(5);
             foreach (var old in rotated)
             {
-                try { File.Delete(old); } catch { }
+                try { File.Delete(old); } catch { /* old rotation file may be locked */ }
             }
         }
-        catch { }
+        catch { /* rotation failed — non-fatal, continue with current file */ }
     }
 
     /// <summary>

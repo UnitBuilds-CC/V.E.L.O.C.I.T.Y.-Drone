@@ -1,4 +1,4 @@
-﻿using global::System.Text.Json;
+using global::System.Text.Json;
 using Drone.Core;
 using Drone.Core.Config;
 
@@ -21,7 +21,7 @@ public class AutonomyEngine : IAsyncDisposable
         var rulesPath = path ?? _config.RulesPath;
         if (!global::System.IO.File.Exists(rulesPath))
         {
-            _logger.LogInformation("No rules file found, using defaults.");
+            _logger.LogInformation("No rules file found at {Path}, using defaults.", rulesPath);
             _rules.Add(new BehaviorRule { Name = "LogAllEvents", Trigger = "*", Action = "log", Enabled = true });
             return;
         }
@@ -33,12 +33,12 @@ public class AutonomyEngine : IAsyncDisposable
             {
                 _rules.Clear();
                 _rules.AddRange(rules);
-                _logger.LogInformation("Loaded " + rules.Length + " behavior rules from " + rulesPath);
+                _logger.LogInformation("Loaded {Count} behavior rules from {Path}", rules.Length, rulesPath);
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError("Failed to load rules: " + ex.Message);
+            _logger.LogError("Failed to load rules from {Path}: {Error}", rulesPath, ex.Message);
             _rules.Add(new BehaviorRule { Name = "LogAllEvents", Trigger = "*", Action = "log", Enabled = true });
         }
     }
@@ -51,8 +51,7 @@ public class AutonomyEngine : IAsyncDisposable
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         LoadRules();
 
-        // Subscribe to all events and execute matching rules
-        eventBus.Subscribe<DroneEvent>(async evt =>
+        eventBus.Subscribe(async evt =>
         {
             foreach (var rule in _rules.Where(r => r.MatchesCondition(evt) && r.Enabled))
             {
@@ -64,19 +63,18 @@ public class AutonomyEngine : IAsyncDisposable
                         await handler(evt, rule.ActionParams, _logger);
                         if (OnActionExecuted != null) await OnActionExecuted(rule.Name, evt.Type, evt.Data);
                     }
-                    catch (Exception ex) { _logger.LogWarning("Rule " + rule.Name + " failed: " + ex.Message); }
+                    catch (Exception ex) { _logger.LogWarning("Rule {Rule} failed: {Error}", rule.Name, ex.Message); }
                 }, _cts.Token);
             }
         });
 
-        // System metrics timer (triggers SystemMetrics + SystemAlert events)
         if (_config.SystemMetricsIntervalSec > 0)
         {
             var timer = new Timer(async _ =>
             {
                 try
                 {
-                    var proc = global::System.Diagnostics.Process.GetCurrentProcess();
+                    using var proc = global::System.Diagnostics.Process.GetCurrentProcess();
                     var cpuTime1 = proc.TotalProcessorTime;
                     var wallTime1 = DateTime.UtcNow;
                     await Task.Delay(1000);
@@ -105,13 +103,12 @@ public class AutonomyEngine : IAsyncDisposable
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning("System metrics error: " + ex.Message);
+                    _logger.LogWarning("System metrics error: {Error}", ex.Message);
                 }
             }, null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(_config.SystemMetricsIntervalSec));
             _timers.Add(timer);
         }
 
-        // Process monitor timer (triggers ProcessStarted/Stopped events)
         if (_config.ProcessMonitorIntervalSec > 0)
         {
             var knownPids = new HashSet<int>();
@@ -119,33 +116,40 @@ public class AutonomyEngine : IAsyncDisposable
             {
                 try
                 {
-                    var current = global::System.Diagnostics.Process.GetProcesses().Select(p => p.Id).ToHashSet();
-                    var started = current.Except(knownPids).ToArray();
-                    var stopped = knownPids.Except(current).ToArray();
-
-                    foreach (var pid in started)
+                    var processes = global::System.Diagnostics.Process.GetProcesses();
+                    try
                     {
-                        try
+                        var current = new HashSet<int>(processes.Select(p => p.Id));
+                        var started = current.Except(knownPids).ToArray();
+                        var stopped = knownPids.Except(current).ToArray();
+
+                        foreach (var pid in started)
                         {
-                            var p = global::System.Diagnostics.Process.GetProcessById(pid);
-                            await eventBus.PublishAsync(new DroneEvent(DroneEventTypes.ProcessStarted, new { pid, name = p.ProcessName }));
+                            try
+                            {
+                                using var p = global::System.Diagnostics.Process.GetProcessById(pid);
+                                await eventBus.PublishAsync(new DroneEvent(DroneEventTypes.ProcessStarted, new { pid, name = p.ProcessName }));
+                            }
+                            catch { /* process may have exited before we could query it */ }
                         }
-                        catch { }
-                    }
 
-                    foreach (var pid in stopped)
+                        foreach (var pid in stopped)
+                        {
+                            await eventBus.PublishAsync(new DroneEvent(DroneEventTypes.ProcessStopped, new { pid }));
+                        }
+
+                        knownPids = current;
+                    }
+                    finally
                     {
-                        await eventBus.PublishAsync(new DroneEvent(DroneEventTypes.ProcessStopped, new { pid }));
+                        foreach (var p in processes) { try { p.Dispose(); } catch { /* process may already be disposed */ } }
                     }
-
-                    knownPids = current;
                 }
-                catch (Exception ex) { _logger.LogWarning("Process monitor error: " + ex.Message); }
+                catch (Exception ex) { _logger.LogWarning("Process monitor error: {Error}", ex.Message); }
             }, null, TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(_config.ProcessMonitorIntervalSec));
             _timers.Add(procTimer);
         }
 
-        // Scheduled task poll timer
         if (_config.ScheduledTaskPollSec > 0)
         {
             var schedTimer = new Timer(async _ =>
@@ -159,7 +163,7 @@ public class AutonomyEngine : IAsyncDisposable
             _timers.Add(schedTimer);
         }
 
-        _logger.LogInformation("Autonomy engine started with " + _rules.Count + " rules");
+        _logger.LogInformation("Autonomy engine started with {Count} rules", _rules.Count);
         return Task.CompletedTask;
     }
 
@@ -167,6 +171,7 @@ public class AutonomyEngine : IAsyncDisposable
     {
         _cts?.Cancel();
         foreach (var t in _timers) t.Dispose();
+        _timers.Clear();
         _cts?.Dispose();
         return ValueTask.CompletedTask;
     }

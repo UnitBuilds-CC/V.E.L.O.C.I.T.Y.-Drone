@@ -76,11 +76,33 @@ volumes:
 
 ### Health Check
 
-The Docker image includes a health check:
+The Docker image includes a health check that verifies the `/health` endpoint returns `"status":"healthy"`:
 ```
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3
-  CMD curl -f http://localhost:9100/health || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3
+  CMD curl -sf http://localhost:9100/health | grep -q '"status":"healthy"' || exit 1
 ```
+
+### Graceful Shutdown
+
+The Docker image sends `SIGTERM` on `docker stop` and allows up to `DRONE_SHUTDOWN_TIMEOUT` seconds (default: 15) for graceful disposal:
+
+```
+STOPSIGNAL SIGTERM
+ENV DRONE_SHUTDOWN_TIMEOUT=15
+```
+
+The shutdown sequence disposes all components in reverse creation order:
+1. AutonomyEngine
+2. CustodyReporter (final flush)
+3. RemoteConnector
+4. ShareConnector
+5. MessengerConnector
+6. EmbeddedFileServer
+7. McpServer (close WebSocket clients)
+8. CustodyAuditLogger
+9. VelocityConnection
+
+If disposal exceeds the timeout, a warning is logged and the process exits.
 
 ### Volumes
 

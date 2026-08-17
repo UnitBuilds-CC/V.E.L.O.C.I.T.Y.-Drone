@@ -1,4 +1,5 @@
-﻿using global::System.Text.Json;
+using global::System.Diagnostics;
+using global::System.Text.Json;
 using Drone.Core;
 using Drone.Services.Messenger;
 using Drone.Services.Share;
@@ -8,6 +9,44 @@ namespace Drone.MCP.Tools;
 
 public static class SystemToolRegistrar
 {
+    // Allowed base directories for file operations (configurable via env var)
+    private static readonly string[] AllowedPaths = GetAllowedPaths();
+
+    /// <summary>Cached empty JSON object to avoid repeated allocation.</summary>
+    private static readonly JsonElement EmptyObject = JsonDocument.Parse("{}").RootElement;
+
+    private static string[] GetAllowedPaths()
+    {
+        var envPaths = Environment.GetEnvironmentVariable("DRONE_ALLOWED_PATHS");
+        if (!string.IsNullOrEmpty(envPaths))
+            return envPaths.Split(';', StringSplitOptions.RemoveEmptyEntries);
+        return Array.Empty<string>();
+    }
+
+    private static bool IsPathAllowed(string path)
+    {
+        if (AllowedPaths.Length == 0) return true;
+        var fullPath = Path.GetFullPath(path);
+        return AllowedPaths.Any(allowed =>
+        {
+            var fullAllowed = Path.GetFullPath(allowed);
+            // Exact match or subdirectory (with separator boundary to prevent prefix attacks)
+            // e.g. "/data" must NOT match "/data-secret/file.txt"
+            return fullPath.Equals(fullAllowed, StringComparison.OrdinalIgnoreCase)
+                || fullPath.StartsWith(fullAllowed + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                || fullPath.StartsWith(fullAllowed + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        });
+    }
+
+    /// <summary>Drone start time for uptime calculation.</summary>
+    private static readonly long StartTimeMs = Environment.TickCount64;
+
+    /// <summary>Timeout for run_command tool (60 seconds).</summary>
+    private static readonly TimeSpan CommandTimeout = TimeSpan.FromSeconds(60);
+
+    /// <summary>Blocked command substrings for security.</summary>
+    private static readonly string[] BlockedCommands = { "format", "del /s", "rm -rf /", "mkfs", "dd if=/dev/zero" };
+
     public static void RegisterAll(
         McpServer server,
         Drone.System.IScreenCapture? screen,
@@ -20,7 +59,7 @@ public static class SystemToolRegistrar
         RemoteConnector? remote,
         ILogger logger)
     {
-        // â”€â”€ Screen tools â”€â”€
+        // Screen tools
         if (screen != null)
         {
             server.RegisterTool("capture_screen", async args =>
@@ -53,23 +92,20 @@ public static class SystemToolRegistrar
             });
             server.RegisterTool("find_image_on_screen", async args =>
             {
-                var templateBase64 = args.GetProperty("template").GetString() ?? "";
-                var threshold = args.TryGetProperty("threshold", out var th) ? th.GetDouble() : 0.8;
-                var screenData = await screen.CaptureScreenAsync();
-                // Basic implementation: compare template against screen regions
-                // In production, this would use OpenCV or similar for template matching
-                var templateData = Convert.FromBase64String(templateBase64);
                 return JsonSerializer.SerializeToElement(new
                 {
-                    found = false,
-                    x = 0, y = 0,
-                    confidence = 0.0,
+                    found = false, x = 0, y = 0, confidence = 0.0,
                     message = "Template matching requires native backend. Use capture_screen + AI vision instead."
                 });
             });
+            server.RegisterTool("get_screen_size", async _ =>
+            {
+                var (w, h) = await screen.GetScreenSizeAsync();
+                return JsonSerializer.SerializeToElement(new { width = w, height = h });
+            });
         }
 
-        // â”€â”€ Input tools â”€â”€
+        // Input tools
         if (input != null)
         {
             server.RegisterTool("type_text", async args =>
@@ -107,25 +143,44 @@ public static class SystemToolRegistrar
             });
             server.RegisterTool("scroll", async args =>
             {
-                await input.ScrollAsync(args.GetProperty("deltaX").GetInt32(), args.GetProperty("deltaY").GetInt32());
+                var deltaX = args.TryGetProperty("deltaX", out var dx) ? dx.GetInt32() : 0;
+                var deltaY = args.TryGetProperty("deltaY", out var dy) ? dy.GetInt32() : 0;
+                await input.ScrollAsync(deltaX, deltaY);
                 return JsonSerializer.SerializeToElement(new { success = true });
             });
         }
 
-        // â”€â”€ System tools â”€â”€
+        // System tools (always available)
         server.RegisterTool("run_command", async args =>
         {
-            var r = await process.RunCommandAsync(
-                args.GetProperty("command").GetString() ?? "",
-                args.TryGetProperty("args", out var a) ? a.GetString() ?? "" : "",
-                args.TryGetProperty("workingDir", out var w) ? w.GetString() : null);
-            return JsonSerializer.SerializeToElement(new
+            var command = args.GetProperty("command").GetString() ?? "";
+            if (BlockedCommands.Any(b => command.Contains(b, StringComparison.OrdinalIgnoreCase)))
+                return JsonSerializer.SerializeToElement(new { error = "Command blocked by security policy" });
+
+            var cmdArgs = args.TryGetProperty("args", out var a) ? a.GetString() ?? "" : "";
+            var workingDir = args.TryGetProperty("workingDir", out var w) ? w.GetString() : null;
+
+            // Apply timeout to prevent hanging commands
+            using var timeoutCts = new CancellationTokenSource(CommandTimeout);
+            try
             {
-                exitCode = r.ExitCode,
-                stdout = r.StandardOutput.Length > 100000 ? r.StandardOutput[..100000] + "..." : r.StandardOutput,
-                stderr = r.StandardError,
-                durationMs = r.Duration.TotalMilliseconds
-            });
+                var r = await process.RunCommandAsync(command, cmdArgs, workingDir).WaitAsync(timeoutCts.Token);
+                return JsonSerializer.SerializeToElement(new
+                {
+                    exitCode = r.ExitCode,
+                    stdout = r.StandardOutput.Length > 100000 ? r.StandardOutput[..100000] + "..." : r.StandardOutput,
+                    stderr = r.StandardError,
+                    durationMs = r.Duration.TotalMilliseconds
+                });
+            }
+            catch (OperationCanceledException)
+            {
+                return JsonSerializer.SerializeToElement(new
+                {
+                    error = $"Command timed out after {CommandTimeout.TotalSeconds}s",
+                    command, exitCode = -1
+                });
+            }
         });
         server.RegisterTool("list_processes", async _ =>
         {
@@ -139,32 +194,58 @@ public static class SystemToolRegistrar
         });
         server.RegisterTool("kill_process", async args =>
         {
-            var ok = await process.KillProcessAsync(args.GetProperty("processId").GetInt32());
-            return JsonSerializer.SerializeToElement(new { success = ok });
+            var pid = args.GetProperty("processId").GetInt32();
+            var ok = await process.KillProcessAsync(pid);
+            return JsonSerializer.SerializeToElement(new { success = ok, processId = pid });
         });
         server.RegisterTool("read_file", async args =>
         {
             var path = args.GetProperty("path").GetString() ?? "";
-            if (!File.Exists(path)) return JsonSerializer.SerializeToElement(new { error = "File not found" });
-            return JsonSerializer.SerializeToElement(new { content = await File.ReadAllTextAsync(path), path });
+            if (!IsPathAllowed(path))
+                return JsonSerializer.SerializeToElement(new { error = "Path not in allowed directories" });
+            if (!File.Exists(path))
+                return JsonSerializer.SerializeToElement(new { error = "File not found" });
+            var content = await File.ReadAllTextAsync(path);
+            return JsonSerializer.SerializeToElement(new { content, path = Path.GetFullPath(path) });
         });
         server.RegisterTool("write_file", async args =>
         {
             var path = args.GetProperty("path").GetString() ?? "";
+            if (!IsPathAllowed(path))
+                return JsonSerializer.SerializeToElement(new { error = "Path not in allowed directories" });
             var content = args.GetProperty("content").GetString() ?? "";
             var dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
             await File.WriteAllTextAsync(path, content);
-            return JsonSerializer.SerializeToElement(new { success = true, path });
+            return JsonSerializer.SerializeToElement(new { success = true, path = Path.GetFullPath(path) });
         });
         server.RegisterTool("list_dir", async args =>
         {
             var path = args.TryGetProperty("path", out var p) ? p.GetString() ?? "." : ".";
-            if (!Directory.Exists(path)) return JsonSerializer.SerializeToElement(new { error = "Directory not found" });
+            if (!IsPathAllowed(path))
+                return JsonSerializer.SerializeToElement(new { error = "Path not in allowed directories" });
+            if (!Directory.Exists(path))
+                return JsonSerializer.SerializeToElement(new { error = "Directory not found" });
             var entries = Directory.GetFileSystemEntries(path)
                 .Select(e => new { name = Path.GetFileName(e), isDir = Directory.Exists(e) })
                 .OrderBy(e => e.name).ToArray();
             return JsonSerializer.SerializeToElement(new { path = Path.GetFullPath(path), count = entries.Length, entries });
+        });
+        server.RegisterTool("find_file", async args =>
+        {
+            var path = args.TryGetProperty("path", out var p) ? p.GetString() ?? "." : ".";
+            var pattern = args.TryGetProperty("pattern", out var pat) ? pat.GetString() ?? "*" : "*";
+            if (!IsPathAllowed(path))
+                return JsonSerializer.SerializeToElement(new { error = "Path not in allowed directories" });
+            if (!Directory.Exists(path))
+                return JsonSerializer.SerializeToElement(new { error = "Directory not found" });
+            // Limit recursion depth to 5 levels to prevent CPU/memory exhaustion on large trees
+            var options = new EnumerationOptions { RecurseSubdirectories = true, MaxRecursionDepth = 5 };
+            var files = Directory.GetFiles(path, pattern, options)
+                .Take(100) // Limit result count
+                .Select(f => new { path = f, size = new FileInfo(f).Length })
+                .ToArray();
+            return JsonSerializer.SerializeToElement(new { count = files.Length, files });
         });
         server.RegisterTool("get_system_info", async _ =>
         {
@@ -182,7 +263,62 @@ public static class SystemToolRegistrar
             return JsonSerializer.SerializeToElement(new { success = true });
         });
 
-        // â”€â”€ Messenger tools â”€â”€
+        // Comprehensive drone status — ALWAYS registered regardless of connector availability
+        server.RegisterTool("get_drone_status", async _ =>
+        {
+            var uptimeSec = (Environment.TickCount64 - StartTimeMs) / 1000;
+            // Use 'using' to properly dispose the Process object (it holds native handles)
+            using var proc = Process.GetCurrentProcess();
+            return JsonSerializer.SerializeToElement(new
+            {
+                agent = "velocity-drone",
+                version = "1.0.0",
+                uptimeSec,
+                memoryMB = proc.WorkingSet64 / 1024 / 1024,
+                threads = proc.Threads.Count,
+                platform = global::System.Runtime.InteropServices.RuntimeInformation.OSDescription,
+                architecture = global::System.Runtime.InteropServices.RuntimeInformation.OSArchitecture.ToString(),
+                mode = Environment.GetEnvironmentVariable("DRONE_MODE") ?? "full",
+                connections = new
+                {
+                    messenger = messenger?.IsConnected ?? false,
+                    share = share?.IsConnected ?? false,
+                    remote = remote?.IsConnected ?? false,
+                    mcpWebSocketClients = server.ConnectedClientCount
+                },
+                capabilities = new
+                {
+                    screenCapture = screen != null,
+                    inputSimulation = input != null,
+                    windowManagement = windows != null,
+                    processManagement = true,
+                    clipboard = true,
+                    fileOperations = true,
+                    commandExecution = true
+                },
+                metrics = new
+                {
+                    totalRequests = server.TotalRequests,
+                    totalErrors = server.TotalErrors
+                }
+            });
+        });
+
+        // Legacy alias
+        server.RegisterTool("get_status", async _ =>
+        {
+            var uptimeSec = (Environment.TickCount64 - StartTimeMs) / 1000;
+            return JsonSerializer.SerializeToElement(new
+            {
+                messenger = messenger?.IsConnected ?? false,
+                share = share?.IsConnected ?? false,
+                remote = remote?.IsConnected ?? false,
+                mcpClients = server.ConnectedClientCount,
+                uptimeSec
+            });
+        });
+
+        // Messenger tools
         if (messenger != null)
         {
             server.RegisterTool("send_message", async args =>
@@ -201,37 +337,31 @@ public static class SystemToolRegistrar
             });
             server.RegisterTool("get_contacts", async _ =>
             {
-                // Request contacts list via messenger protocol
                 await messenger.SendControlMessageAsync("get_contacts", "{}");
                 return JsonSerializer.SerializeToElement(new { status = "requested", message = "Contacts will be delivered via event bus" });
             });
             server.RegisterTool("upload_media", async args =>
             {
                 var filePath = args.GetProperty("filePath").GetString() ?? "";
+                if (!IsPathAllowed(filePath))
+                    return JsonSerializer.SerializeToElement(new { error = "Path not in allowed directories" });
                 var mediaType = args.TryGetProperty("mediaType", out var mt) ? mt.GetString() ?? "file" : "file";
                 var fileName = await messenger.UploadMediaAsync(filePath, mediaType);
                 return JsonSerializer.SerializeToElement(new { success = true, fileName });
             });
             server.RegisterTool("download_media", async args =>
             {
-                var url = args.GetProperty("url").GetString() ?? "";
                 var localPath = args.GetProperty("localPath").GetString() ?? "";
-                await messenger.DownloadMediaAsync(url, localPath);
+                if (!IsPathAllowed(localPath))
+                    return JsonSerializer.SerializeToElement(new { error = "Path not in allowed directories" });
+                await messenger.DownloadMediaAsync(
+                    args.GetProperty("url").GetString() ?? "",
+                    localPath);
                 return JsonSerializer.SerializeToElement(new { success = true, localPath });
-            });
-            server.RegisterTool("get_status", async _ =>
-            {
-                return JsonSerializer.SerializeToElement(new
-                {
-                    messenger = messenger.IsConnected,
-                    share = share?.IsConnected ?? false,
-                    remote = remote?.IsConnected ?? false,
-                    uptimeSec = Environment.TickCount64 / 1000
-                });
             });
         }
 
-        // â”€â”€ Share tools â”€â”€
+        // Share tools
         if (share != null)
         {
             server.RegisterTool("upload_file", async args =>
@@ -263,20 +393,15 @@ public static class SystemToolRegistrar
             });
             server.RegisterTool("delete_file", async args =>
             {
-                var ok = await share.DeleteFileAsync(args.GetProperty("path").GetString() ?? "");
+                var path = args.GetProperty("path").GetString() ?? "";
+                if (!IsPathAllowed(path))
+                    return JsonSerializer.SerializeToElement(new { error = "Path not in allowed directories" });
+                var ok = await share.DeleteFileAsync(path);
                 return JsonSerializer.SerializeToElement(new { success = ok });
-            });
-            server.RegisterTool("get_share_status", async _ =>
-            {
-                return JsonSerializer.SerializeToElement(new
-                {
-                    connected = share.IsConnected,
-                    serverUrl = share.ServerUrl
-                });
             });
         }
 
-        // â”€â”€ Remote tools â”€â”€
+        // Remote tools
         if (remote != null)
         {
             server.RegisterTool("get_screen_stream", async args =>
@@ -289,7 +414,7 @@ public static class SystemToolRegistrar
             server.RegisterTool("send_input", async args =>
             {
                 var inputType = args.GetProperty("inputType").GetString() ?? "";
-                var data = args.TryGetProperty("data", out var d) ? d : JsonDocument.Parse("{}").RootElement;
+                var data = args.TryGetProperty("data", out var d) ? d : EmptyObject;
                 await remote.SendInputAsync(inputType, data);
                 return JsonSerializer.SerializeToElement(new { success = true });
             });
@@ -305,7 +430,7 @@ public static class SystemToolRegistrar
             });
         }
 
-        // â”€â”€ App Control tools â”€â”€
+        // Window management tools
         if (windows != null)
         {
             server.RegisterTool("list_windows", async _ =>
@@ -351,13 +476,17 @@ public static class SystemToolRegistrar
                 return JsonSerializer.SerializeToElement(new { found = false });
             });
         }
+
         server.RegisterTool("launch_app", async args =>
         {
             var app = args.GetProperty("app").GetString() ?? "";
+            // Security: block launching dangerous applications
+            if (BlockedCommands.Any(b => app.Contains(b, StringComparison.OrdinalIgnoreCase)))
+                return JsonSerializer.SerializeToElement(new { error = "Application blocked by security policy" });
             var r = await process.RunCommandAsync(app, args.TryGetProperty("args", out var a) ? a.GetString() ?? "" : "");
             return JsonSerializer.SerializeToElement(new { launched = r.ExitCode == 0, app });
         });
 
-        logger.LogInformation("All MCP tools registered (" + server.GetToolList().Length + " tools)");
+        logger.LogInformation("All MCP tools registered ({Count} tools)", server.GetToolList().Length);
     }
 }

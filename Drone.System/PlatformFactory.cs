@@ -1,4 +1,4 @@
-﻿using Drone.Core;
+using Drone.Core;
 
 namespace Drone.System;
 
@@ -47,6 +47,8 @@ public static class PlatformFactory
             return new Windows.Win32WindowManager(logger);
         if (OperatingSystem.IsLinux())
             return new Linux.X11WindowManager(logger);
+        if (OperatingSystem.IsMacOS())
+            return new MacOS.CoreGraphicsWindowManager(logger);
         throw new PlatformNotSupportedException("Window management not supported on this platform.");
     }
 }

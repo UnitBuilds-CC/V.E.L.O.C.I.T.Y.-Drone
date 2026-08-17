@@ -31,6 +31,9 @@ public class McpServer : IAsyncDisposable
     /// <summary>Audit logger for security-sensitive operations.</summary>
     private AuditLogger? _audit;
 
+    /// <summary>Optional health status provider for extended health checks (custody chain, connections, etc).</summary>
+    private Func<HealthStatus>? _healthProvider;
+
     /// <summary>Maximum allowed WebSocket message size (10 MB). Prevents DoS via memory exhaustion.</summary>
     private const int MaxMessageSize = 10 * 1024 * 1024;
 
@@ -85,6 +88,9 @@ public class McpServer : IAsyncDisposable
 
     /// <summary>Set the audit logger for security event tracking.</summary>
     public void SetAuditLogger(AuditLogger? audit) => _audit = audit;
+
+    /// <summary>Set the health status provider for extended health checks.</summary>
+    public void SetHealthProvider(Func<HealthStatus>? provider) => _healthProvider = provider;
 
     public void RegisterTool(string name, Func<JsonElement, Task<JsonElement>> handler) => _tools[name] = handler;
 
@@ -284,17 +290,33 @@ public class McpServer : IAsyncDisposable
                 if (!context.Request.IsWebSocketRequest &&
                     context.Request.Url?.AbsolutePath.EndsWith("/health") == true)
                 {
-                    var healthJson = JsonSerializer.Serialize(new
+                    var health = new HealthStatus
                     {
-                        status = "healthy",
-                        uptimeSec = (Environment.TickCount64 - _startTimeMs) / 1000,
-                        connectedClients = ConnectedClientCount,
-                        totalRequests = TotalRequests,
-                        totalErrors = TotalErrors,
-                        totalRejected = TotalRejected,
-                        toolsAvailable = _tools.Count,
-                        tls = isTls
-                    });
+                        Status = "healthy",
+                        UptimeSec = (Environment.TickCount64 - _startTimeMs) / 1000,
+                        ConnectedClients = ConnectedClientCount,
+                        TotalRequests = TotalRequests,
+                        TotalErrors = TotalErrors,
+                        TotalRejected = TotalRejected,
+                        ToolsAvailable = _tools.Count,
+                        Tls = isTls,
+                        MaxConnections = MaxConnections
+                    };
+                    // Merge extended health from provider (custody chain, connections, etc.)
+                    if (_healthProvider != null)
+                    {
+                        try
+                        {
+                            var extended = _healthProvider();
+                            health.CustodySequence = extended.CustodySequence;
+                            health.CustodyHash = extended.CustodyHash;
+                            health.MessengerConnected = extended.MessengerConnected;
+                            health.UplinkConnected = extended.UplinkConnected;
+                            health.RemoteConnected = extended.RemoteConnected;
+                        }
+                        catch { /* health provider failure is non-fatal */ }
+                    }
+                    var healthJson = JsonSerializer.Serialize(health);
                     var healthBytes = Encoding.UTF8.GetBytes(healthJson);
                     context.Response.StatusCode = 200;
                     context.Response.ContentType = "application/json";
@@ -303,6 +325,7 @@ public class McpServer : IAsyncDisposable
                     // Security headers
                     context.Response.AddHeader("X-Content-Type-Options", "nosniff");
                     context.Response.AddHeader("X-Frame-Options", "DENY");
+                    context.Response.AddHeader("Cache-Control", "no-store");
                     await context.Response.OutputStream.WriteAsync(healthBytes, _cts.Token);
                     context.Response.Close();
                     continue;
@@ -367,8 +390,8 @@ public class McpServer : IAsyncDisposable
         }
         finally
         {
-            try { _wsListener?.Stop(); } catch { }
-            try { _wsListener?.Close(); } catch { }
+            try { _wsListener?.Stop(); } catch { /* listener may already be stopped */ }
+            try { _wsListener?.Close(); } catch { /* listener may already be closed */ }
         }
     }
 
@@ -389,7 +412,7 @@ public class McpServer : IAsyncDisposable
                     result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
-                        try { await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Ack", CancellationToken.None); } catch { }
+                        try { await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Ack", CancellationToken.None); } catch { /* client may have already disconnected */ }
                         return;
                     }
                     ms.Write(buffer, 0, result.Count);
@@ -469,7 +492,7 @@ public class McpServer : IAsyncDisposable
                     using var closeCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
                     await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Done", closeCts.Token);
                 }
-                catch { }
+                catch { /* WebSocket close failed — client likely already gone */ }
             }
             writeLock.Dispose();
             ws.Dispose();
@@ -707,14 +730,38 @@ public class McpServer : IAsyncDisposable
                 using var closeCts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
                 await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Server shutting down", closeCts.Token);
             }
-            catch { }
+            catch { /* WebSocket close failed during shutdown — disposing anyway */ }
             ws.Dispose();
         }
-        try { _wsListener?.Stop(); } catch { }
-        try { _wsListener?.Close(); } catch { }
+        try { _wsListener?.Stop(); } catch { /* listener may already be stopped */ }
+        try { _wsListener?.Close(); } catch { /* listener may already be closed */ }
         _cts?.Dispose();
         GC.SuppressFinalize(this);
     }
 }
 
 public record ToolInfo(string Name, string Description);
+
+/// <summary>Health check response model with extended diagnostics.</summary>
+public class HealthStatus
+{
+    public string Status { get; set; } = "healthy";
+    public long UptimeSec { get; set; }
+    public int ConnectedClients { get; set; }
+    public long TotalRequests { get; set; }
+    public long TotalErrors { get; set; }
+    public long TotalRejected { get; set; }
+    public int ToolsAvailable { get; set; }
+    public bool Tls { get; set; }
+    public int MaxConnections { get; set; }
+    /// <summary>Current custody chain sequence number (null if custody not initialized).</summary>
+    public long? CustodySequence { get; set; }
+    /// <summary>Current custody chain hash head (null if custody not initialized).</summary>
+    public string? CustodyHash { get; set; }
+    /// <summary>Whether the Messenger connector is connected.</summary>
+    public bool? MessengerConnected { get; set; }
+    /// <summary>Whether the uplink connection is active.</summary>
+    public bool? UplinkConnected { get; set; }
+    /// <summary>Whether the remote connector is connected.</summary>
+    public bool? RemoteConnected { get; set; }
+}

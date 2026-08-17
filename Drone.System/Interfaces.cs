@@ -1,4 +1,4 @@
-﻿namespace Drone.System;
+namespace Drone.System;
 
 /// <summary>Cross-platform screen capture abstraction.</summary>
 public interface IScreenCapture
@@ -14,6 +14,17 @@ public interface IScreenCapture
 
     /// <summary>Get pixel color at coordinates. Returns RGB tuple.</summary>
     Task<(byte R, byte G, byte B)> GetPixelColorAsync(int x, int y);
+
+    /// <summary>Capture raw BGRA pixels for delta processing. Allocates — use overload for zero-alloc.</summary>
+    Task<(byte[] Pixels, uint Stride, int Width, int Height)?> CaptureRawBgraAsync(CancellationToken ct = default)
+        => Task.FromResult<(byte[], uint, int, int)?>(null);
+
+    /// <summary>Ultra-cheap screen change detection.</summary>
+    bool HasScreenChanged() => true;
+
+    /// <summary>Capture raw BGRA into pre-allocated buffer. Zero-alloc. Returns (stride, w, h) or null.</summary>
+    Task<(uint Stride, int Width, int Height)?> CaptureRawBgraAsync(byte[] targetBuffer, CancellationToken ct = default)
+        => Task.FromResult<(uint, int, int)?>(null);
 }
 
 /// <summary>Cross-platform input simulation abstraction.</summary>
@@ -56,7 +67,7 @@ public interface IWindowManager
     Task<(int X, int Y, int Width, int Height)> GetWindowBoundsAsync(nint handle);
 }
 
-// â”€â”€ Data Models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Data Models ──────────────────────────────────────────────
 
 public enum MouseButton { Left, Right, Middle }
 

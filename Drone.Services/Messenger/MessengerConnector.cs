@@ -1,4 +1,4 @@
-﻿using global::System.Net.WebSockets;
+using global::System.Net.WebSockets;
 using global::System.Text;
 using global::System.Text.Json;
 using Drone.Core;
@@ -9,11 +9,20 @@ namespace Drone.Services.Messenger;
 public class MessengerConnector : IAsyncDisposable
 {
     private readonly MessengerConfig _config;
+    private readonly string _droneId;
     private readonly ILogger _logger;
+    private readonly HttpClient _http;
     private ClientWebSocket? _ws;
     private CancellationTokenSource? _cts;
-    private bool _connected;
+    private volatile bool _connected;
     private int _reconnectAttempts;
+    private readonly CircuitBreaker _breaker = new(failureThreshold: 5, openTimeout: TimeSpan.FromSeconds(30));
+
+    /// <summary>Lock to serialize concurrent WebSocket send operations.</summary>
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
+
+    /// <summary>Timeout for send operations to prevent hangs.</summary>
+    private static readonly TimeSpan SendTimeout = TimeSpan.FromSeconds(10);
 
     public event Func<string, string, string, Task>? OnMessageReceived;
     public event Func<string, string, string, Task>? OnMediaReceived;
@@ -23,22 +32,35 @@ public class MessengerConnector : IAsyncDisposable
 
     public bool IsConnected => _connected;
 
-    public MessengerConnector(MessengerConfig config, ILogger logger) { _config = config; _logger = logger; }
+    public MessengerConnector(MessengerConfig config, string droneId, ILogger logger)
+    {
+        _config = config;
+        _droneId = droneId;
+        _logger = logger;
+        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+    }
 
     public async Task ConnectAsync(CancellationToken ct = default)
     {
         if (string.IsNullOrEmpty(_config.ServerUrl)) throw new InvalidOperationException("Messenger ServerUrl is required.");
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _reconnectAttempts = 0;
         while (!_cts.Token.IsCancellationRequested)
         {
             try
             {
                 _ws = new ClientWebSocket();
-                await _ws.ConnectAsync(new Uri(_config.ServerUrl), _cts.Token);
-                var auth = JsonSerializer.Serialize(new { type = "auth", username = "Drone", secret = _config.ConnectionSecret });
-                await _ws.SendAsync(Encoding.UTF8.GetBytes(auth), WebSocketMessageType.Text, true, _cts.Token);
+                // Build WebSocket URL with required query parameters (username, device_id, secret for auth)
+                var separator = _config.ServerUrl.Contains("?") ? "&" : "?";
+                var username = _droneId;
+                var connectUrl = $"{_config.ServerUrl}{separator}username={Uri.EscapeDataString(username)}&device_id=drone";
+                if (!string.IsNullOrEmpty(_config.ConnectionSecret))
+                    connectUrl += $"&secret={Uri.EscapeDataString(_config.ConnectionSecret)}";
+                await _ws.ConnectAsync(new Uri(connectUrl), _cts.Token);
+                var auth = JsonSerializer.Serialize(new { type = "auth", username, secret = _config.ConnectionSecret });
+                await SafeSendAsync(Encoding.UTF8.GetBytes(auth), _cts.Token);
                 _connected = true; _reconnectAttempts = 0;
-                _logger.LogInformation("Connected to Messenger at " + _config.ServerUrl);
+                _logger.LogInformation("Connected to Messenger at {Url}", SanitizeUrl(_config.ServerUrl));
                 if (OnConnectionChanged != null) await OnConnectionChanged(true);
                 await ReceiveLoopAsync(_cts.Token);
             }
@@ -49,8 +71,15 @@ public class MessengerConnector : IAsyncDisposable
                 if (OnConnectionChanged != null) await OnConnectionChanged(false);
                 if (!_config.AutoReconnect || _cts.Token.IsCancellationRequested) break;
                 _reconnectAttempts++;
+                // If circuit breaker is open, wait for its timeout before retrying
+                if (_breaker.IsOpen)
+                {
+                    _logger.LogWarning("Messenger circuit breaker open. Waiting for recovery...");
+                    await Task.Delay(30000, _cts.Token);
+                    continue;
+                }
                 var delay = Math.Min(1000 * Math.Pow(2, _reconnectAttempts), 30000);
-                _logger.LogWarning("Messenger disconnected. Reconnect attempt " + _reconnectAttempts + " in " + (int)delay + "ms. Error: " + ex.Message);
+                _logger.LogWarning("Messenger disconnected. Reconnect attempt {Attempt} in {Delay}ms. Error: {Error}", _reconnectAttempts, (int)delay, ex.Message);
                 await Task.Delay((int)delay, _cts.Token);
             }
         }
@@ -58,14 +87,14 @@ public class MessengerConnector : IAsyncDisposable
 
     public async Task SendMessageAsync(string to, string content, CancellationToken ct = default)
     {
-        var msg = JsonSerializer.Serialize(new { type = "message", to, content });
-        await SendAsync(msg, ct);
+        var msg = JsonSerializer.Serialize(new { type = "chat", to, content });
+        await SafeSendAsync(Encoding.UTF8.GetBytes(msg), ct);
     }
 
     public async Task SendGroupMessageAsync(string groupId, string content, CancellationToken ct = default)
     {
         var msg = JsonSerializer.Serialize(new { type = "group_message", group = groupId, content });
-        await SendAsync(msg, ct);
+        await SafeSendAsync(Encoding.UTF8.GetBytes(msg), ct);
     }
 
     public async Task<string> UploadMediaAsync(string filePath, string mediaType, CancellationToken ct = default)
@@ -74,36 +103,47 @@ public class MessengerConnector : IAsyncDisposable
         var base64 = Convert.ToBase64String(fileBytes);
         var fileName = Path.GetFileName(filePath);
         var msg = JsonSerializer.Serialize(new { type = "media_upload", fileName, mediaType, data = base64 });
-        await SendAsync(msg, ct);
+        await SafeSendAsync(Encoding.UTF8.GetBytes(msg), ct);
         return fileName;
     }
 
     public async Task DownloadMediaAsync(string url, string localPath, CancellationToken ct = default)
     {
-        using var http = new HttpClient();
-        var data = await http.GetByteArrayAsync(url, ct);
+        var data = await _http.GetByteArrayAsync(url, ct);
         var dir = Path.GetDirectoryName(localPath);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
         await File.WriteAllBytesAsync(localPath, data, ct);
-        _logger.LogInformation("Downloaded media to " + localPath);
+        _logger.LogInformation("Downloaded media to {Path}", localPath);
     }
 
     public async Task SendCallSignalAsync(string to, string signalType, object payload, CancellationToken ct = default)
     {
         var msg = JsonSerializer.Serialize(new { type = "call_signal", to, signalType, payload });
-        await SendAsync(msg, ct);
+        await SafeSendAsync(Encoding.UTF8.GetBytes(msg), ct);
     }
 
     public async Task SendControlMessageAsync(string command, string payload, CancellationToken ct = default)
     {
         var msg = JsonSerializer.Serialize(new { type = "control", command, payload });
-        await SendAsync(msg, ct);
+        await SafeSendAsync(Encoding.UTF8.GetBytes(msg), ct);
     }
 
-    private async Task SendAsync(string json, CancellationToken ct)
+    /// <summary>Thread-safe WebSocket send with timeout.</summary>
+    private async Task SafeSendAsync(byte[] data, CancellationToken ct)
     {
         if (_ws?.State != WebSocketState.Open) throw new InvalidOperationException("Not connected to Messenger.");
-        await _ws.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, ct);
+        if (!await _sendLock.WaitAsync(SendTimeout, ct)) return;
+        try
+        {
+            using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            sendCts.CancelAfter(SendTimeout);
+            await _ws.SendAsync(new ArraySegment<byte>(data), WebSocketMessageType.Text, true, sendCts.Token);
+        }
+        catch (OperationCanceledException) { /* send timeout or cancel */ }
+        finally
+        {
+            _sendLock.Release();
+        }
     }
 
     private async Task ReceiveLoopAsync(CancellationToken ct)
@@ -121,32 +161,33 @@ public class MessengerConnector : IAsyncDisposable
                 ms.Write(buffer, 0, result.Count);
             } while (!result.EndOfMessage);
             var json = Encoding.UTF8.GetString(ms.ToArray());
+            if (string.IsNullOrWhiteSpace(json)) continue;
+            _logger.LogInformation("[Messenger] Received frame: {Len} bytes", json.Length);
             try
             {
                 using var doc = JsonDocument.Parse(json);
                 var root = doc.RootElement;
-                var msgType = root.GetProperty("type").GetString();
+                if (!root.TryGetProperty("type", out var typeProp)) continue;
+                var msgType = typeProp.GetString();
                 switch (msgType)
                 {
-                    case "message":
+                    case "chat":
                         if (OnMessageReceived != null)
                             await OnMessageReceived(
-                                root.GetProperty("from").GetString() ?? "",
-                                root.GetProperty("content").GetString() ?? "",
+                                root.TryGetProperty("from", out var from) ? from.GetString() ?? "" : "",
+                                root.TryGetProperty("content", out var content) ? content.GetString() ?? "" : "",
                                 root.TryGetProperty("id", out var id) ? id.GetString() ?? "" : "");
                         break;
                     case "media":
                         if (OnMediaReceived != null)
                             await OnMediaReceived(
-                                root.GetProperty("from").GetString() ?? "",
-                                root.GetProperty("url").GetString() ?? "",
+                                root.TryGetProperty("from", out var mFrom) ? mFrom.GetString() ?? "" : "",
+                                root.TryGetProperty("url", out var url) ? url.GetString() ?? "" : "",
                                 root.TryGetProperty("mediaType", out var mt) ? mt.GetString() ?? "" : "");
                         break;
                     case "call_signal":
-                        if (OnCallSignal != null)
-                            await OnCallSignal(
-                                root.GetProperty("from").GetString() ?? "",
-                                root.GetProperty("payload"));
+                        if (OnCallSignal != null && root.TryGetProperty("from", out var cFrom) && root.TryGetProperty("payload", out var payload))
+                            await OnCallSignal(cFrom.GetString() ?? "", payload);
                         break;
                     case "control_response":
                         if (OnControlResponse != null)
@@ -154,8 +195,21 @@ public class MessengerConnector : IAsyncDisposable
                         break;
                 }
             }
-            catch (Exception ex) { _logger.LogWarning("Failed to parse Messenger message: " + ex.Message); }
+            catch (Exception ex) { _logger.LogWarning("Failed to parse Messenger message: {Error}", ex.Message); }
         }
+    }
+
+    /// <summary>Remove query parameters (secrets) from URL for logging.</summary>
+    private static string SanitizeUrl(string? url)
+    {
+        if (string.IsNullOrEmpty(url)) return "(not configured)";
+        try
+        {
+            var uri = new Uri(url);
+            if (string.IsNullOrEmpty(uri.Query)) return url;
+            return url.Replace(uri.Query, "?***");
+        }
+        catch { return "(invalid url)"; }
     }
 
     public async ValueTask DisposeAsync()
@@ -164,9 +218,13 @@ public class MessengerConnector : IAsyncDisposable
         if (_ws?.State == WebSocketState.Open)
         {
             try { await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Disposing", CancellationToken.None); }
-            catch { }
+            catch { /* WebSocket may already be faulted — disposing anyway */ }
         }
         _ws?.Dispose();
+        _http.Dispose();
+        _sendLock.Dispose();
         _cts?.Dispose();
     }
 }
+
+

@@ -25,11 +25,11 @@ public class CrossPlatformClipboardManager : IClipboardManager
     {
         if (OperatingSystem.IsLinux())
         {
-            try { var psi = new ProcessStartInfo("xclip", "-selection clipboard") { RedirectStandardInput = true, UseShellExecute = false, CreateNoWindow = true }; using var p = Process.Start(psi); if (p != null) { await p.StandardInput.WriteAsync(text.AsMemory(), ct); p.StandardInput.Close(); await p.WaitForExitAsync(ct); } } catch { }
+            try { var psi = new ProcessStartInfo("xclip", "-selection clipboard") { RedirectStandardInput = true, UseShellExecute = false, CreateNoWindow = true }; using var p = Process.Start(psi); if (p != null) { await p.StandardInput.WriteAsync(text.AsMemory(), ct); p.StandardInput.Close(); await p.WaitForExitAsync(ct); } } catch { /* xclip may not be installed or clipboard unavailable */ }
         }
         else if (OperatingSystem.IsMacOS())
         {
-            try { var psi = new ProcessStartInfo("pbcopy") { RedirectStandardInput = true, UseShellExecute = false, CreateNoWindow = true }; using var p = Process.Start(psi); if (p != null) { await p.StandardInput.WriteAsync(text.AsMemory(), ct); p.StandardInput.Close(); await p.WaitForExitAsync(ct); } } catch { }
+            try { var psi = new ProcessStartInfo("pbcopy") { RedirectStandardInput = true, UseShellExecute = false, CreateNoWindow = true }; using var p = Process.Start(psi); if (p != null) { await p.StandardInput.WriteAsync(text.AsMemory(), ct); p.StandardInput.Close(); await p.WaitForExitAsync(ct); } } catch { /* pbcopy may not be available */ }
         }
     }
 
