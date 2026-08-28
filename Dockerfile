@@ -1,73 +1,73 @@
-# Velocity Drone — Multi-stage build for Linux (headless cloud VM or LAN)
-# Usage:
-#   docker build -t velocity-drone .
-#   docker run -d --name drone \
-#     -e DRONE_MODE=headless \
-#     -e DRONE_MCP_URL=http://0.0.0.0:9100 \
-#     -e DRONE_MCP_TOKEN=your-secret-token \
-#     -e DRONE_WS_URL=wss://your-host/ws/drone \
-#     -e DRONE_ALLOWED_PATHS=/data \
-#     -p 9100:9100 \
-#     velocity-drone
+# ============================================================
+# Velocity Drone — Multi-stage Docker Build
+# Stage 1: Build Rust native libraries
+# Stage 2: Build .NET application
+# Stage 3: Minimal runtime image
+# ============================================================
 
-FROM mcr.microsoft.com/dotnet/sdk:10.0-preview AS build
-WORKDIR /src
+# --- Stage 1: Rust build ---
+FROM rust:slim AS rust-builder
+WORKDIR /build/rust
+COPY Drone.Native/Cargo.toml Drone.Native/Cargo.lock* ./
+COPY Drone.Native/src ./src
+RUN cargo build --release && \
+    cp target/release/libdrone_native.so /build/libdrone_native.so
 
-# Copy project files for restore
-COPY Drone.Core/*.csproj Drone.Core/
-COPY Drone.System/*.csproj Drone.System/
-COPY Drone.Services/*.csproj Drone.Services/
-COPY Drone.MCP/*.csproj Drone.MCP/
-COPY Drone.Autonomy/*.csproj Drone.Autonomy/
-COPY Drone.Agent/*.csproj Drone.Agent/
-COPY Drone.Custody/*.csproj Drone.Custody/
-COPY Drone.Native/*.csproj Drone.Native/
-COPY tests/Drone.Tests/*.csproj tests/Drone.Tests/
-COPY tests/Drone.E2E/*.csproj tests/Drone.E2E/
+# --- Stage 2: .NET build ---
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS dotnet-builder
+WORKDIR /build
 
-# Restore (build projects individually — no solution file)
-RUN dotnet restore Drone.Agent/Drone.Agent.csproj
+# Copy solution and project files first (restore cache layer)
+COPY VelocityDrone.slnx Directory.Build.props global.json ./
+COPY Drone.Agent/Drone.Agent.csproj Drone.Agent/
+COPY Drone.Core/Drone.Core.csproj Drone.Core/
+COPY Drone.MCP/Drone.MCP.csproj Drone.MCP/
+COPY Drone.Native/Drone.Native.csproj Drone.Native/
+COPY Drone.Services/Drone.Services.csproj Drone.Services/
+COPY Drone.System/Drone.System.csproj Drone.System/
+COPY Drone.Autonomy/Drone.Autonomy.csproj Drone.Autonomy/
+COPY Drone.Custody/Drone.Custody.csproj Drone.Custody/
+COPY tests/Drone.Tests/Drone.Tests.csproj tests/Drone.Tests/
+COPY tests/Drone.E2E/Drone.E2E.csproj tests/Drone.E2E/
 
-# Copy source
+# Restore packages (EnableWindowsTargeting allows cross-compile from Linux)
+RUN dotnet restore VelocityDrone.slnx /p:EnableWindowsTargeting=true
+
+# Copy all source code
 COPY . .
 
-# Build and publish
-RUN dotnet publish Drone.Agent/Drone.Agent.csproj -c Release -o /app/publish --no-restore /p:SkipRust=true
+# Build and publish (skip Rust build — using pre-built native lib from stage 1)
+RUN dotnet publish Drone.Agent/Drone.Agent.csproj -c Release -o /app/publish \
+    /p:SkipRust=true /p:PublishSingleFile=false /p:EnableWindowsTargeting=true
 
-# Runtime
-FROM mcr.microsoft.com/dotnet/aspnet:10.0-preview AS runtime
+# --- Stage 3: Runtime ---
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
-# Install system dependencies for Linux (screen/input tools when running in full mode)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    xdotool xclip wmctrl xrandr x11-utils imagemagick \
-    && rm -rf /var/lib/apt/lists/*
+# Create non-root user for security
+RUN groupadd -r drone && useradd -r -g drone -m drone
 
-COPY --from=build /app/publish .
+# Copy published app
+COPY --from=dotnet-builder /app/publish .
 
-# Default environment — headless mode for cloud VMs
-# Override these at runtime with -e flags
-ENV DRONE_MODE=headless
-ENV DRONE_ID=Drone
-ENV DRONE_MCP_URL=http://0.0.0.0:9100
-ENV DRONE_MCP_TOKEN=""
-ENV DRONE_MCP_TLS=0
-ENV DRONE_AUDIT_LOG=/data/audit/drone-audit.jsonl
-ENV DRONE_WS_URL=""
-ENV DRONE_ALLOWED_PATHS=/data
-ENV DRONE_SHUTDOWN_TIMEOUT=15
-ENV DRONE_CUSTODY_PATH=/data/custody/drone-custody.jsonl
-ENV Drone__Uplink__Transport=auto
-ENV Drone__Uplink__BufferSize=4194304
+# Copy native library from Rust builder
+COPY --from=rust-builder /build/libdrone_native.so ./libdrone_native.so
 
-# MCP WebSocket port
+# Set ownership
+RUN chown -R drone:drone /app
+
+# Expose MCP WebSocket port
 EXPOSE 9100
 
-# Health check for cloud orchestrators — uses JSON health endpoint
+# Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -sf http://localhost:9100/health | grep -q '"status":"healthy"' || exit 1
+    CMD curl -f http://localhost:9100/health/live || exit 1
 
-# Graceful shutdown signal
-STOPSIGNAL SIGTERM
+# Run as non-root
+USER drone
+
+# Default to headless mode in Docker
+ENV DRONE_MODE=headless
+ENV DRONE_MCP_URL=http://0.0.0.0:9100
 
 ENTRYPOINT ["dotnet", "velocity-drone.dll"]

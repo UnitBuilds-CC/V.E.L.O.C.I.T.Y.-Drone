@@ -1,15 +1,25 @@
-﻿## .NET
-bin/
-obj/
-*.user
-*.suo
-*.cache
-.vs/
+﻿# ===========================
+# Rust
+# ===========================
+**/target/
+**/*.rs.bk
 
-## Rust
-Drone.Native/target/
+# ===========================
+# .NET
+# ===========================
+**/bin/
+**/obj/
+**/*.user
+**/*.suo
+**/*.cache
+**/*.vs/
+**/TestResults/
+**/*.nupkg
+**/packages/
 
-## Build artifacts
+# ===========================
+# Build artifacts
+# ===========================
 publish/
 publish-new/
 release-*/
@@ -17,22 +27,36 @@ release-*/
 build-test/
 build-v2/
 build-v3/
-*.nupkg
+**/installer/output/
+**/installer/build/
 installer/*.exe
+*.log
 
-## IDE
+# ===========================
+# IDE / Editor
+# ===========================
 .idea/
+.vscode/
 *.swp
+*.swo
 *~
 
-## OS
+# ===========================
+# OS
+# ===========================
 .DS_Store
 Thumbs.db
+desktop.ini
+ehthumbs.db
 
-## Secrets
+# ===========================
+# Secrets
+# ===========================
 *.env
 appsettings.Production.json
 config/secrets.json
 
-## Node
+# ===========================
+# Node
+# ===========================
 node_modules/

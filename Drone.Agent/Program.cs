@@ -4,6 +4,7 @@ using Drone.Core.Config;
 using Drone.Core.Custody;
 using Drone.MCP;
 using Drone.MCP.Tools;
+using Drone.Services.Relay;
 using Drone.Services.Custody;
 using Drone.Services.Messenger;
 using Drone.Services.Share;
@@ -23,6 +24,41 @@ public class Program
     [STAThread]
     public static async Task Main(string[] args)
     {
+        // --- Diagnostics mode: dump system info and exit ---
+        if (args.Any(a => a.Equals("--diagnostics", StringComparison.OrdinalIgnoreCase)))
+        {
+            var osDesc = global::System.Runtime.InteropServices.RuntimeInformation.OSDescription;
+            var osArch = global::System.Runtime.InteropServices.RuntimeInformation.OSArchitecture;
+            var fwDesc = global::System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription;
+            var nativeDll = global::System.IO.Path.Combine(AppContext.BaseDirectory, "velocity_delta.dll");
+            var nativeV2 = global::System.IO.Path.Combine(AppContext.BaseDirectory, "velocity_v2_ffi.dll");
+            var mcpTokenSet = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DRONE_MCP_TOKEN"));
+            var wsUrlSet = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DRONE_WS_URL"));
+            Console.WriteLine("=== Velocity Drone Diagnostics ===");
+            Console.WriteLine($"Version:      1.0.0");
+            Console.WriteLine($"OS:           {osDesc}");
+            Console.WriteLine($"Arch:         {osArch}");
+            Console.WriteLine($"Runtime:      {fwDesc}");
+            Console.WriteLine($"PID:          {Environment.ProcessId}");
+            Console.WriteLine($"Base Dir:     {AppContext.BaseDirectory}");
+            Console.WriteLine($"DRONE_MODE:   {Environment.GetEnvironmentVariable("DRONE_MODE") ?? "full"}");
+            Console.WriteLine($"DRONE_ID:     {Environment.GetEnvironmentVariable("DRONE_ID") ?? "(default)"}");
+            Console.WriteLine($"DRONE_MCP_URL:{Environment.GetEnvironmentVariable("DRONE_MCP_URL") ?? "http://+:9100"}");
+            Console.WriteLine($"DRONE_MCP_TOKEN: {(mcpTokenSet ? "***configured***" : "(not set)")}");
+            Console.WriteLine($"DRONE_WS_URL: {(wsUrlSet ? "***configured***" : "(not set)")}");
+            Console.WriteLine($"DRONE_ALLOWED_PATHS: {Environment.GetEnvironmentVariable("DRONE_ALLOWED_PATHS") ?? "(all)"}");
+            Console.WriteLine($"DRONE_ROLE:     {Environment.GetEnvironmentVariable("DRONE_ROLE") ?? "standalone"}");
+            Console.WriteLine($"DRONE_RELAY_PORT: {Environment.GetEnvironmentVariable("DRONE_RELAY_PORT") ?? "9200"}");
+            Console.WriteLine($"DRONE_RELAY_URL:  {Environment.GetEnvironmentVariable("DRONE_RELAY_URL") ?? "(not set)"}");
+            var tlsCert = Environment.GetEnvironmentVariable("DRONE_RELAY_TLS_CERT");
+            Console.WriteLine($"DRONE_RELAY_TLS:  {(tlsCert != null ? $"enabled ({tlsCert})" : "disabled")}");
+            Console.WriteLine($"DRONE_RATE_LIMIT: {Environment.GetEnvironmentVariable("DRONE_RELAY_RATE_LIMIT") ?? "30"} msg/s");
+            Console.WriteLine($"Native DLL (delta):  {(global::System.IO.File.Exists(nativeDll) ? "present" : "MISSING")}");
+            Console.WriteLine($"Native DLL (v2 FFI): {(global::System.IO.File.Exists(nativeV2) ? "present" : "MISSING")}");
+            Console.WriteLine("=== End Diagnostics ===");
+            return;
+        }
+
         Application.SetHighDpiMode(HighDpiMode.SystemAware);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
@@ -56,6 +92,7 @@ public class Program
         AutonomyEngine? autonomy = null;
         CustodyAuditLogger? custodyLogger = null;
         Drone.Services.Share.EmbeddedFileServer? fileServer = null;
+        RelayServer? relayServer = null;
         CancellationTokenSource? masterCts = null;
 
         try
@@ -74,7 +111,6 @@ public class Program
                 try { masterCts.Cancel(); } catch (ObjectDisposedException) { }
             };
 
-            logger.LogInformation("Mode: {Mode}", Environment.GetEnvironmentVariable("DRONE_MODE") ?? "full");
             logger.LogInformation("Platform: {OS} {Arch}",
                 global::System.Runtime.InteropServices.RuntimeInformation.OSDescription,
                 global::System.Runtime.InteropServices.RuntimeInformation.OSArchitecture);
@@ -89,6 +125,46 @@ public class Program
 
             droneConfig.Mode = Environment.GetEnvironmentVariable("DRONE_MODE")?.ToLower() == "headless"
                 ? DroneMode.Headless : droneConfig.Mode;
+
+            // --- Role & Relay configuration ---
+            var roleStr = Environment.GetEnvironmentVariable("DRONE_ROLE")?.ToLower();
+            droneConfig.Role = roleStr switch
+            {
+                "server" => DroneRole.Server,
+                "client" => DroneRole.Client,
+                _ => DroneRole.Standalone
+            };
+
+            var relayPort = Environment.GetEnvironmentVariable("DRONE_RELAY_PORT");
+            if (int.TryParse(relayPort, out var port) && port > 0 && port <= 65535)
+                droneConfig.Relay.Port = port;
+
+            var relayUrl = Environment.GetEnvironmentVariable("DRONE_RELAY_URL");
+            if (!string.IsNullOrEmpty(relayUrl))
+                droneConfig.Relay.RelayUrl = relayUrl;
+
+            var relayKey = Environment.GetEnvironmentVariable("DRONE_RELAY_KEY");
+            if (!string.IsNullOrEmpty(relayKey))
+                droneConfig.Relay.ApiKey = relayKey;
+
+            var rateLimit = Environment.GetEnvironmentVariable("DRONE_RELAY_RATE_LIMIT");
+            if (int.TryParse(rateLimit, out var rps) && rps >= 0)
+                droneConfig.Relay.MaxMessagesPerSecond = rps;
+
+            var tlsCert = Environment.GetEnvironmentVariable("DRONE_RELAY_TLS_CERT");
+            if (!string.IsNullOrEmpty(tlsCert))
+                droneConfig.Relay.TlsCertificatePath = tlsCert;
+
+            var tlsCertPass = Environment.GetEnvironmentVariable("DRONE_RELAY_TLS_PASS");
+            if (!string.IsNullOrEmpty(tlsCertPass))
+                droneConfig.Relay.TlsCertificatePassword = tlsCertPass;
+
+            // Auto-enable relay based on role
+            droneConfig.Relay.Enabled = droneConfig.Role == DroneRole.Server || droneConfig.Role == DroneRole.Standalone;
+
+            logger.LogInformation("Mode: {Mode}, Role: {Role}",
+                droneConfig.Mode.ToString().ToLower(),
+                droneConfig.Role.ToString().ToLower());
 
             if (Environment.GetEnvironmentVariable("DRONE_ID") is string id && !string.IsNullOrEmpty(id))
                 droneConfig.DroneId = id;
@@ -141,6 +217,55 @@ public class Program
 
             Task? messengerTask = null;
             Task? remoteTask = null;
+
+            // --- Start Relay Server (if server or standalone role) ---
+            if (droneConfig.Relay.Enabled)
+            {
+                try
+                {
+                    relayServer = new RelayServer(droneConfig.Relay, droneConfig.DroneId, logger);
+                    await relayServer.StartAsync(masterCts!.Token);
+                    logger.LogInformation("Relay server started on port {Port}", droneConfig.Relay.Port);
+                    trayApp.ShowNotification("Relay Server", $"Listening on port {droneConfig.Relay.Port}", ToolTipIcon.Info);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError("Relay server failed to start: {Error}", ex.Message);
+                    relayServer = null;
+                }
+            }
+
+            // --- Auto-configure client connectors for relay (if client or standalone role) ---
+            if (droneConfig.Role == DroneRole.Client || droneConfig.Role == DroneRole.Standalone)
+            {
+                var relayBase = droneConfig.Relay.RelayUrl ?? $"http://localhost:{droneConfig.Relay.Port}";
+                var wsRelayBase = relayBase.Replace("http://", "ws://").Replace("https://", "wss://");
+
+                // Auto-set messenger URL if not explicitly configured
+                if (string.IsNullOrEmpty(droneConfig.Messenger.ServerUrl) && droneConfig.Relay.Enabled)
+                {
+                    droneConfig.Messenger.ServerUrl = $"{wsRelayBase}/relay/messenger/";
+                    droneConfig.Messenger.ConnectionSecret ??= droneConfig.Relay.ApiKey;
+                    logger.LogInformation("Auto-configured Messenger -> {Url}", droneConfig.Messenger.ServerUrl);
+                }
+
+                // Auto-set share URL if not explicitly configured
+                if (string.IsNullOrEmpty(droneConfig.Share.ServerUrl) && droneConfig.Relay.Enabled)
+                {
+                    droneConfig.Share.ServerUrl = $"{relayBase}/relay/share/";
+                    droneConfig.Share.AdminApiKey ??= droneConfig.Relay.ApiKey;
+                    droneConfig.Share.Enabled = true;
+                    logger.LogInformation("Auto-configured Share -> {Url}", droneConfig.Share.ServerUrl);
+                }
+
+                // Auto-set remote URL if not explicitly configured
+                if (string.IsNullOrEmpty(droneConfig.Remote.ServerUrl) && droneConfig.Relay.Enabled)
+                {
+                    droneConfig.Remote.ServerUrl = $"{wsRelayBase}/relay/remote/";
+                    droneConfig.Remote.ApiKey ??= droneConfig.Relay.ApiKey;
+                    logger.LogInformation("Auto-configured Remote -> {Url}", droneConfig.Remote.ServerUrl);
+                }
+            }
 
             if (!string.IsNullOrEmpty(droneConfig.Messenger.ServerUrl))
             {
@@ -421,7 +546,7 @@ public class Program
             };
 
             await autonomy.StartAsync(eventBus);
-            SystemToolRegistrar.RegisterAll(mcpServer, screen, input, process, clipboard, windows, messenger, share, remote, logger);
+            SystemToolRegistrar.RegisterAll(mcpServer, screen, input, process, clipboard, windows, messenger, share, remote, logger, relayServer);
 
             var mcpToken = Environment.GetEnvironmentVariable("DRONE_MCP_TOKEN");
             if (!string.IsNullOrEmpty(mcpToken)) { mcpServer.SetAuthToken(mcpToken); logger.LogInformation("MCP auth enabled (token configured)"); }
@@ -430,10 +555,11 @@ public class Program
                 // Remote connections configured — require auth to prevent unauthorized access
                 logger.LogError("Remote connections are configured but DRONE_MCP_TOKEN is not set. " +
                     "MCP WebSocket will require authentication. Set DRONE_MCP_TOKEN environment variable.");
-                logger.LogWarning("Generating temporary MCP token for this session...");
+                logger.LogWarning("Generating temporary MCP token for this session — check DRONE_MCP_TOKEN env var on stdout.");
                 var tempToken = Convert.ToHexString(global::System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
                 mcpServer.SetAuthToken(tempToken);
-                logger.LogWarning("Temporary MCP token: {Token} — set DRONE_MCP_TOKEN to this value for persistent auth", tempToken);
+                // SECURITY: Write token to stdout only (not to structured logs) so it can be captured securely
+                Console.WriteLine($"DRONE_TEMP_MCP_TOKEN={tempToken}");
             }
             else
             {
@@ -537,6 +663,13 @@ public class Program
                 // Wrap entire disposal in a timeout task to enforce the shutdown deadline
                 var disposalTask = Task.Run(async () =>
                 {
+                    // Stop relay server
+                    if (relayServer != null)
+                    {
+                        logger.LogInformation("Disposing relay server ({Connections} connections)...", relayServer.ConnectionCount);
+                        await relayServer.DisposeAsync();
+                    }
+
                     // Stop MCP server first (rejects new connections)
                     if (mcpServer != null)
                     {

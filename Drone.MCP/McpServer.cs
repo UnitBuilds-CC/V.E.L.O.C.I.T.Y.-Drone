@@ -19,6 +19,7 @@ public class McpServer : IAsyncDisposable
     private readonly ILogger _logger;
     private readonly Dictionary<string, Func<JsonElement, Task<JsonElement>>> _tools = new();
     private CancellationTokenSource? _cts;
+    private CancellationToken Ct => _cts?.Token ?? CancellationToken.None;
     private HttpListener? _wsListener;
     private readonly List<WebSocket> _activeWsClients = new();
     /// <summary>Per-client write locks keyed by WebSocket instance.</summary>
@@ -143,7 +144,7 @@ public class McpServer : IAsyncDisposable
 
             var spinWait = new SpinWait();
 
-            while (!_cts.Token.IsCancellationRequested)
+            while (!Ct.IsCancellationRequested)
             {
                 // Poll for REQ_READY state (atomic read)
                 var reqState = view.ReadByte(ReqStateOffset);
@@ -207,7 +208,7 @@ public class McpServer : IAsyncDisposable
                 if (spinWait.Count > ShmemSpinWaitIterations)
                 {
                     // After spinning, yield to avoid burning CPU
-                    await Task.Delay(0, _cts.Token);
+                    await Task.Delay(0, Ct);
                     spinWait.Reset();
                 }
             }
@@ -234,6 +235,11 @@ public class McpServer : IAsyncDisposable
         var isTls = url.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
         _logger.LogInformation("MCP WebSocket server starting at {Url} (max {MaxConn} connections, TLS: {Tls})",
             url, MaxConnections, isTls ? "enabled" : "disabled");
+
+        if (!isTls)
+        {
+            _logger.LogWarning("MCP server running WITHOUT TLS. Ensure TLS is terminated at reverse proxy (nginx/caddy/ingress) in production.");
+        }
 
         _wsListener = new HttpListener();
         var listenUrl = url;
@@ -281,7 +287,7 @@ public class McpServer : IAsyncDisposable
 
         try
         {
-            while (!_cts.Token.IsCancellationRequested)
+            while (!Ct.IsCancellationRequested)
             {
                 var context = await _wsListener.GetContextAsync();
                 var clientAddr = context.Request.RemoteEndPoint?.ToString() ?? "unknown";
@@ -321,12 +327,47 @@ public class McpServer : IAsyncDisposable
                     context.Response.StatusCode = 200;
                     context.Response.ContentType = "application/json";
                     context.Response.ContentLength64 = healthBytes.Length;
-                    context.Response.AddHeader("Access-Control-Allow-Origin", "*");
                     // Security headers
                     context.Response.AddHeader("X-Content-Type-Options", "nosniff");
                     context.Response.AddHeader("X-Frame-Options", "DENY");
                     context.Response.AddHeader("Cache-Control", "no-store");
-                    await context.Response.OutputStream.WriteAsync(healthBytes, _cts.Token);
+                    // Reflect request Origin for CORS (restrictive — no wildcard)
+                    var origin = context.Request.Headers["Origin"];
+                    if (!string.IsNullOrEmpty(origin))
+                        context.Response.AddHeader("Access-Control-Allow-Origin", origin);
+                    await context.Response.OutputStream.WriteAsync(healthBytes, Ct);
+                    context.Response.Close();
+                    continue;
+                }
+
+                // Kubernetes-style liveness probe — lightweight, just checks process is alive
+                if (!context.Request.IsWebSocketRequest &&
+                    context.Request.Url?.AbsolutePath.EndsWith("/health/live") == true)
+                {
+                    var liveBytes = Encoding.UTF8.GetBytes("{\"status\":\"alive\"}");
+                    context.Response.StatusCode = 200;
+                    context.Response.ContentType = "application/json";
+                    context.Response.ContentLength64 = liveBytes.Length;
+                    await context.Response.OutputStream.WriteAsync(liveBytes, Ct);
+                    context.Response.Close();
+                    continue;
+                }
+
+                // Kubernetes-style readiness probe — checks if server can accept traffic
+                if (!context.Request.IsWebSocketRequest &&
+                    context.Request.Url?.AbsolutePath.EndsWith("/health/ready") == true)
+                {
+                    var ready = _cts?.Token.IsCancellationRequested != true;
+                    var readyJson = JsonSerializer.Serialize(new { status = ready ? "ready" : "not_ready", tools = _tools.Count });
+                    var readyBytes = Encoding.UTF8.GetBytes(readyJson);
+                    context.Response.StatusCode = ready ? 200 : 503;
+                    context.Response.ContentType = "application/json";
+                    context.Response.ContentLength64 = readyBytes.Length;
+                    var stream = context.Response.OutputStream;
+                    if (stream is not null)
+                    {
+                        await stream.WriteAsync(readyBytes, Ct);
+                    }
                     context.Response.Close();
                     continue;
                 }
@@ -340,7 +381,7 @@ public class McpServer : IAsyncDisposable
                         _audit?.LogSecurity(clientAddr, "connection_limit", $"Max {MaxConnections} reached");
                         context.Response.StatusCode = 503;
                         var msg = Encoding.UTF8.GetBytes("{\"error\":\"Server at maximum connections\"}");
-                        await context.Response.OutputStream.WriteAsync(msg, _cts.Token);
+                        await context.Response.OutputStream.WriteAsync(msg, Ct);
                         context.Response.Close();
                         _logger.LogWarning("Rejected connection: max connections ({Max}) from {Remote}", MaxConnections, clientAddr);
                         continue;
@@ -356,7 +397,7 @@ public class McpServer : IAsyncDisposable
                             _audit?.LogSecurity(clientAddr, "auth_failure", "Invalid or missing token");
                             context.Response.StatusCode = 401;
                             var msg = Encoding.UTF8.GetBytes("{\"error\":\"Unauthorized\"}");
-                            await context.Response.OutputStream.WriteAsync(msg, _cts.Token);
+                            await context.Response.OutputStream.WriteAsync(msg, Ct);
                             context.Response.Close();
                             _logger.LogWarning("Rejected connection: invalid token from {Remote}", clientAddr);
                             continue;
@@ -373,7 +414,7 @@ public class McpServer : IAsyncDisposable
                     }
                     _audit?.LogConnection(clientAddr, "connect", $"Total: {ConnectedClientCount}");
                     _logger.LogInformation("MCP WebSocket client connected from {Addr} ({Count} total)", clientAddr, ConnectedClientCount);
-                    _ = Task.Run(() => HandleWebSocketClient(ws, clientWriteLock, clientAddr, _cts.Token));
+                    _ = Task.Run(() => HandleWebSocketClient(ws, clientWriteLock, clientAddr, Ct));
                 }
                 else
                 {
@@ -518,15 +559,15 @@ public class McpServer : IAsyncDisposable
         }
     }
 
-    /// <summary>Constant-time string comparison to prevent timing attacks.</summary>
+    /// <summary>Constant-time string comparison to prevent timing attacks.
+    /// Uses CryptographicOperations.FixedTimeEquals for guaranteed constant-time behavior.</summary>
     private static bool SecureCompare(string? a, string b)
     {
         if (a is null) return false;
-        if (a.Length != b.Length) return false;
-        var result = 0;
-        for (var i = 0; i < a.Length; i++)
-            result |= a[i] ^ b[i];
-        return result == 0;
+        // Encode to UTF8 bytes and compare with FixedTimeEquals to avoid length-based timing leak
+        var aBytes = global::System.Text.Encoding.UTF8.GetBytes(a);
+        var bBytes = global::System.Text.Encoding.UTF8.GetBytes(b);
+        return global::System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(aBytes, bBytes);
     }
 
     /// <summary>Send a notification to all connected WebSocket clients.</summary>
@@ -746,6 +787,7 @@ public record ToolInfo(string Name, string Description);
 public class HealthStatus
 {
     public string Status { get; set; } = "healthy";
+    public string Version { get; set; } = "1.0.0";
     public long UptimeSec { get; set; }
     public int ConnectedClients { get; set; }
     public long TotalRequests { get; set; }

@@ -11,10 +11,27 @@ public class AutonomyEngine : IAsyncDisposable
     private readonly List<BehaviorRule> _rules = new();
     private readonly List<Timer> _timers = new();
     private CancellationTokenSource? _cts;
+    private volatile bool _halted;
 
     public event Func<string, string, object, Task>? OnActionExecuted;
 
+    /// <summary>Whether the autonomy engine has been emergency-stopped.</summary>
+    public bool IsHalted => _halted;
+
     public AutonomyEngine(AutonomyConfig config, ILogger logger) { _config = config; _logger = logger; }
+
+    /// <summary>
+    /// Emergency kill switch — immediately halts all autonomous operations.
+    /// Rules will not fire until the engine is restarted via StartAsync.
+    /// </summary>
+    public void EmergencyStop(string reason = "manual")
+    {
+        _halted = true;
+        _cts?.Cancel();
+        foreach (var t in _timers) t.Dispose();
+        _timers.Clear();
+        _logger.LogWarning("AUTONOMY EMERGENCY STOP: {Reason}", reason);
+    }
 
     public void LoadRules(string? path = null)
     {
@@ -48,11 +65,16 @@ public class AutonomyEngine : IAsyncDisposable
     public Task StartAsync(EventBus eventBus, CancellationToken ct = default)
     {
         if (!_config.Enabled) { _logger.LogInformation("Autonomy engine disabled."); return Task.CompletedTask; }
+        // Reset halt state on restart
+        _halted = false;
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         LoadRules();
 
         eventBus.Subscribe(async evt =>
         {
+            // Kill switch: skip all rule processing when halted
+            if (_halted) return;
+
             foreach (var rule in _rules.Where(r => r.MatchesCondition(evt) && r.Enabled))
             {
                 _ = Task.Run(async () =>

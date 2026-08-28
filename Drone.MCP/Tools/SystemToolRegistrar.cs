@@ -4,6 +4,7 @@ using Drone.Core;
 using Drone.Services.Messenger;
 using Drone.Services.Share;
 using Drone.Services.Remote;
+using Drone.Services.Relay;
 
 namespace Drone.MCP.Tools;
 
@@ -57,7 +58,8 @@ public static class SystemToolRegistrar
         MessengerConnector? messenger,
         ShareConnector? share,
         RemoteConnector? remote,
-        ILogger logger)
+        ILogger logger,
+        RelayServer? relayServer = null)
     {
         // Screen tools
         if (screen != null)
@@ -279,12 +281,19 @@ public static class SystemToolRegistrar
                 platform = global::System.Runtime.InteropServices.RuntimeInformation.OSDescription,
                 architecture = global::System.Runtime.InteropServices.RuntimeInformation.OSArchitecture.ToString(),
                 mode = Environment.GetEnvironmentVariable("DRONE_MODE") ?? "full",
+                role = Environment.GetEnvironmentVariable("DRONE_ROLE") ?? "standalone",
                 connections = new
                 {
                     messenger = messenger?.IsConnected ?? false,
                     share = share?.IsConnected ?? false,
                     remote = remote?.IsConnected ?? false,
                     mcpWebSocketClients = server.ConnectedClientCount
+                },
+                relay = new
+                {
+                    running = relayServer?.IsRunning ?? false,
+                    connections = relayServer?.ConnectionCount ?? 0,
+                    connectedDrones = relayServer?.ConnectedDrones.ToArray() ?? Array.Empty<string>()
                 },
                 capabilities = new
                 {

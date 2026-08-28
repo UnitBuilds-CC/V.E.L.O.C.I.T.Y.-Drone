@@ -14,6 +14,9 @@ public class DroneConfig
     /// <summary>Operating mode: full (screen+input+services) or headless (services only).</summary>
     public DroneMode Mode { get; set; } = DroneMode.Full;
 
+    /// <summary>Drone role: server (hosts relay), client (connects to relay), or standalone (both).</summary>
+    public DroneRole Role { get; set; } = DroneRole.Standalone;
+
     /// <summary>Connection settings for the Velocity uplink.</summary>
     public UplinkConfig Uplink { get; set; } = new();
 
@@ -32,6 +35,9 @@ public class DroneConfig
     /// <summary>MCP server settings.</summary>
     public McpConfig Mcp { get; set; } = new();
 
+    /// <summary>Relay server settings (for server/standalone roles).</summary>
+    public RelayConfig Relay { get; set; } = new();
+
     /// <summary>
     /// Validates all config sections. Throws InvalidOperationException if any section is invalid.
     /// </summary>
@@ -45,6 +51,7 @@ public class DroneConfig
         Remote.Validate();
         Autonomy.Validate();
         Mcp.Validate();
+        Relay.Validate();
     }
 
     public static DroneConfig Load(string path)
@@ -67,6 +74,19 @@ public enum DroneMode
     Full,
     /// <summary>Headless: no screen/input, services and system commands only. For cloud VMs.</summary>
     Headless
+}
+
+/// <summary>
+/// Drone role in the relay architecture.
+/// </summary>
+public enum DroneRole
+{
+    /// <summary>Hosts relay server and connects as client (single-machine mode).</summary>
+    Standalone,
+    /// <summary>Hosts relay server for other drones to connect to.</summary>
+    Server,
+    /// <summary>Connects to an external relay server.</summary>
+    Client
 }
 
 public class UplinkConfig
@@ -206,5 +226,62 @@ public class McpConfig
             throw new InvalidOperationException("Mcp.BufferPath must not be empty");
         if (BufferSize <= 0 || BufferSize > 64 * 1024 * 1024)
             throw new InvalidOperationException($"Mcp.BufferSize must be between 1 and 67108864 (64MB), got {BufferSize}");
+    }
+}
+
+/// <summary>
+/// Relay server configuration for drone-to-drone communication.
+/// </summary>
+public class RelayConfig
+{
+    /// <summary>Whether the relay server is enabled (auto-set by Role).</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>Port for the relay server to listen on.</summary>
+    public int Port { get; set; } = 9200;
+
+    /// <summary>Shared API key for drone authentication.</summary>
+    public string? ApiKey { get; set; }
+
+    /// <summary>Storage path for file share service.</summary>
+    public string StoragePath { get; set; } = "relay_data";
+
+    /// <summary>Maximum concurrent WebSocket connections.</summary>
+    public int MaxConnections { get; set; } = 32;
+
+    /// <summary>Maximum upload file size in bytes (default 100 MB).</summary>
+    public long MaxUploadSize { get; set; } = 100 * 1024 * 1024;
+
+    /// <summary>Maximum total storage quota in bytes (default 1 GB).</summary>
+    public long StorageQuotaBytes { get; set; } = 1024L * 1024 * 1024;
+
+    /// <summary>Max messages per second per drone (0 = unlimited).</summary>
+    public int MaxMessagesPerSecond { get; set; } = 30;
+
+    /// <summary>Path to PFX certificate file for TLS. If set, relay also listens on HTTPS.</summary>
+    public string? TlsCertificatePath { get; set; }
+
+    /// <summary>Password for the PFX certificate file.</summary>
+    public string? TlsCertificatePassword { get; set; }
+
+    /// <summary>WebSocket URL of the relay server (for client role).</summary>
+    public string? RelayUrl { get; set; }
+
+    public void Validate()
+    {
+        if (Port < 1 || Port > 65535)
+            throw new InvalidOperationException($"Relay.Port must be between 1 and 65535, got {Port}");
+        if (MaxConnections < 1 || MaxConnections > 1000)
+            throw new InvalidOperationException($"Relay.MaxConnections must be between 1 and 1000, got {MaxConnections}");
+        if (MaxUploadSize < 1024 || MaxUploadSize > 10L * 1024 * 1024 * 1024)
+            throw new InvalidOperationException($"Relay.MaxUploadSize must be between 1KB and 10GB, got {MaxUploadSize}");
+        if (StorageQuotaBytes < 1024 || StorageQuotaBytes > 100L * 1024 * 1024 * 1024)
+            throw new InvalidOperationException($"Relay.StorageQuotaBytes must be between 1KB and 100GB, got {StorageQuotaBytes}");
+        if (MaxMessagesPerSecond < 0 || MaxMessagesPerSecond > 10000)
+            throw new InvalidOperationException($"Relay.MaxMessagesPerSecond must be between 0 and 10000, got {MaxMessagesPerSecond}");
+        if (!string.IsNullOrEmpty(TlsCertificatePath) && !global::System.IO.File.Exists(TlsCertificatePath))
+            throw new InvalidOperationException($"Relay.TlsCertificatePath file not found: '{TlsCertificatePath}'");
+        if (!string.IsNullOrEmpty(RelayUrl) && !Uri.TryCreate(RelayUrl, UriKind.Absolute, out _))
+            throw new InvalidOperationException($"Relay.RelayUrl is not a valid URI: '{RelayUrl}'");
     }
 }
