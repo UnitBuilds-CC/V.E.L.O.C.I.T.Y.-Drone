@@ -31,12 +31,17 @@ docker run -d --name drone \
   -e DRONE_MODE=headless \
   -e DRONE_MCP_URL=http://0.0.0.0:9100 \
   -e DRONE_MCP_TOKEN=your-secret-token \
+  -e DRONE_ALLOW_INSECURE_HTTP=1 \
   -e DRONE_WS_URL=wss://your-host/ws/drone \
   -e DRONE_ALLOWED_PATHS=/data \
   -p 9100:9100 \
   -v /data:/data \
   velocity-drone:latest
 ```
+
+> **Note:** The Docker image runs `Drone.Agent.Headless` — a cross-platform entry point with no WinForms dependency. The Windows tray app (`Drone.Agent`) is only used for desktop deployments.
+
+> **TLS:** Set `DRONE_ALLOW_INSECURE_HTTP=1` to allow non-TLS WebSocket connections. In production, use `https://` URLs or terminate TLS at a reverse proxy.
 
 ### Docker Compose
 
@@ -76,11 +81,16 @@ volumes:
 
 ### Health Check
 
-The Docker image includes a health check that verifies the `/health` endpoint returns `"status":"healthy"`:
+The Docker image includes a health check that verifies the `/health/live` endpoint:
 ```
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3
-  CMD curl -sf http://localhost:9100/health | grep -q '"status":"healthy"' || exit 1
+  CMD wget -q --spider http://localhost:9100/health/live || exit 1
 ```
+
+The runtime image installs `wget` for this purpose. The headless agent exposes three health endpoints:
+- `/health/live` — Liveness probe (process is alive)
+- `/health/ready` — Readiness probe (server can accept traffic)
+- `/health` — Full health status (connections, custody chain, tool count)
 
 ### Graceful Shutdown
 
@@ -244,8 +254,11 @@ Required GitHub secrets:
 
 - [ ] Set `DRONE_MCP_TOKEN` to a strong random value
 - [ ] Set `DRONE_ALLOWED_PATHS` to restrict file access
-- [ ] Use TLS for WebSocket connections (`wss://`)
+- [ ] Use TLS for WebSocket connections (`wss://`) or terminate TLS at reverse proxy
+- [ ] Set `DRONE_ALLOW_INSECURE_HTTP=1` only when TLS is terminated at reverse proxy
 - [ ] Store custody logs in a directory with restricted permissions
 - [ ] Rotate `ConnectionSecret` and `AdminApiKey` regularly
 - [ ] Monitor custody trail for chain breaks (indicates tampering)
 - [ ] Keep .NET runtime updated
+- [ ] Verify DLL checksums (`Drone.Native/checksums.sha256`) after clone
+- [ ] Configure Dependabot for automated dependency updates

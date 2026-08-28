@@ -185,7 +185,7 @@ dotnet build Drone.Custody/Drone.Custody.csproj
 ## Testing
 
 ```bash
-# Unit tests (100 tests)
+# Unit tests (181 tests)
 dotnet test tests/Drone.Tests/Drone.Tests.csproj
 
 # E2E integration tests (10 tests + 3 skipped on Windows without admin)
@@ -212,7 +212,7 @@ dotnet run --project tests/Drone.E2E/Drone.E2E.csproj
 ```bash
 # Docker (headless, for cloud VMs)
 docker build -t velocity-drone:latest .
-docker run -d -e DRONE_MODE=headless -e DRONE_MCP_TOKEN=secret -p 9100:9100 velocity-drone
+docker run -d -e DRONE_MODE=headless -e DRONE_MCP_TOKEN=secret -e DRONE_ALLOW_INSECURE_HTTP=1 -p 9100:9100 velocity-drone:latest
 
 # Windows tray app
 dotnet publish Drone.Agent/Drone.Agent.csproj -c Release -o ./publish
@@ -241,40 +241,48 @@ See [Deployment Guide](docs/deployment.md) for Docker Compose, systemd, Azure de
 
 ```
 Velocity-Drone/
-├── Drone.Agent/            # Entry point, tray app, DI wiring
+├── Drone.Agent/            # Entry point, tray app, DI wiring (Windows)
 │   ├── Program.cs          # Main, RunDroneAsync
 │   ├── UI/                 # TrayApp, system tray UI
 │   ├── Benchmarks/         # DroneBenchmark suite
+│   └── appsettings.json    # Configuration
+├── Drone.Agent.Headless/   # Headless entry point (Docker/Linux)
+│   ├── Program.cs          # Main, no WinForms dependency
 │   └── appsettings.json    # Configuration
 ├── Drone.Core/             # Shared types and protocol
 │   ├── Custody/            # Hash-chained custody trail
 │   │   ├── CustodyRecord.cs
 │   │   ├── CustodyChain.cs
 │   │   ├── CorrelationId.cs
-│   │   └── CustodyAuditLogger.cs
+│   │   ├── CustodyAuditLogger.cs
+│   │   └── CustodyBinarySerializer.cs
 │   ├── Protocol/           # NMCP binary framing, NDA triples
 │   ├── Config/             # DroneConfig, validation
 │   ├── CircuitBreaker.cs   # Thread-safe circuit breaker (Closed/Open/HalfOpen)
+│   ├── AuditLogger.cs      # MCP security audit logger
 │   └── VelocityConnection.cs
 ├── Drone.Services/         # Connectors and background services
 │   ├── Messenger/          # MessengerConnector
 │   ├── Remote/             # RemoteConnector (NMCP/NDA)
 │   ├── Share/              # ShareConnector, EmbeddedFileServer
+│   ├── Relay/              # RelayServer, MessengerRelay, RemoteBridge
 │   └── Custody/            # CustodyReporter
 ├── Drone.MCP/              # MCP server, tool registration
+│   └── Tools/              # SystemToolRegistrar
 ├── Drone.System/           # Platform abstractions (screen, input, window, process)
 │   ├── Windows/            # Win32 implementations
 │   ├── Linux/              # Linux implementations
 │   └── MacOS/              # macOS implementations
 ├── Drone.Autonomy/         # Rule engine, behavior rules, event bus
 ├── Drone.Native/           # Rust FFI (delta frames, WebP)
+│   └── checksums.sha256    # Pre-built DLL integrity manifest
 ├── Drone.Custody/          # Standalone custody server
 │   ├── CustodyLogStore.cs
 │   ├── CustodyServerHost.cs
 │   ├── CustodyQueryEngine.cs
 │   └── Program.cs
 ├── tests/
-│   ├── Drone.Tests/        # 100 xUnit tests
+│   ├── Drone.Tests/        # 181 xUnit tests
 │   └── Drone.E2E/          # E2E integration tests
 ├── docs/                   # Documentation
 │   ├── user-guide.md       # **Start here** — end-user guide
@@ -286,5 +294,8 @@ Velocity-Drone/
 │   ├── development.md
 │   ├── production-hardening.md
 │   └── troubleshooting.md
+├── .github/
+│   ├── workflows/          # CI/CD (SHA-pinned actions)
+│   └── dependabot.yml      # Automated dependency updates
 └── DeltaBench/             # Delta frame benchmarks
 ```

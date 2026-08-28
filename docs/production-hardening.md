@@ -121,26 +121,35 @@ ENV DRONE_SHUTDOWN_TIMEOUT=15
 
 | Input | Validation | Location |
 |-------|-----------|----------|
-| Shell commands | Reject `\| & ; \` $ ( )` | `Program.cs` command handler |
+| Shell commands | Reject `\| & ; \` $ ( ) > < ^ % ! \n \r` + null bytes + length limit | `Program.cs`, `CrossPlatformProcessManager.cs` |
 | Click coordinates | Bounds: -10000 to 10000 | `Program.cs` click handler |
-| File paths | Path traversal protection | `EmbeddedFileServer.IsPathSafe()` |
+| File paths | Path traversal + symlink/reparse point check + null byte rejection | `EmbeddedFileServer.IsPathSafe()`, `EmbeddedRelayFileServer.IsPathSafe()` |
 | Config values | Range validation | `DroneConfig.Validate()` |
+| API keys | Constant-time comparison (`FixedTimeEquals`) | `RelayServer`, `EmbeddedFileServer`, `McpServer` |
+| Upload size | 100MB max (bounded read loop) | `EmbeddedFileServer`, `EmbeddedRelayFileServer` |
+| WebSocket messages | 10-64MB max per message | All receive loops |
+| Self-update | SHA-256 sidecar checksum required | `Program.cs` update handler |
 
 ### Path Traversal Protection
 
-The `EmbeddedFileServer` validates all file paths to prevent directory traversal attacks:
+Both file servers validate all file paths to prevent directory traversal and symlink escape attacks:
 
 ```csharp
 private bool IsPathSafe(string relativePath)
 {
+    if (relativePath.Contains('~') || relativePath.Contains('\0')) return false;
     var combined = Path.Combine(_storagePath, relativePath);
     var fullPath = Path.GetFullPath(combined);
     var storageRoot = Path.GetFullPath(_storagePath);
-    return fullPath.StartsWith(storageRoot, StringComparison.OrdinalIgnoreCase);
+    if (!fullPath.StartsWith(storageRoot, StringComparison.OrdinalIgnoreCase))
+        return false;
+    // Check each path component for symlinks/reparse points
+    // ... (walks each directory component checking FileAttributes.ReparsePoint)
+    return true;
 }
 ```
 
-Attempts to access paths outside the storage directory return `403 Forbidden`.
+Attempts to access paths outside the storage directory or via symlinks return `403 Forbidden`.
 
 ### Error Sanitization
 
@@ -153,13 +162,14 @@ Error responses to clients never expose internal exception details:
 | `OperationCanceledException` | "Operation cancelled" |
 | All others | "Internal error" |
 
-### MCP Authentication
+### MCP Authentication & TLS
 
-The MCP server enforces bearer token authentication when remote connections are configured:
+The MCP server enforces bearer token authentication and TLS:
 
 - If `DRONE_MCP_TOKEN` is set: required for all WebSocket connections
-- If remote connections configured but no token: auto-generates temporary token and logs warning
+- If remote connections configured but no token: auto-generates temporary token (written to stderr)
 - If no remote connections: auth optional (localhost-only safe)
+- **TLS required**: MCP server refuses to start without TLS unless `DRONE_ALLOW_INSECURE_HTTP=1` is explicitly set
 
 ### Secret Redaction
 
@@ -180,25 +190,25 @@ All `HttpClient` instances have explicit timeouts to prevent infinite hangs:
 
 ## Exception Handling
 
-All `catch { }` blocks in the codebase include inline comments explaining why the swallow is intentional. This makes disposal and cleanup paths auditable.
+All `catch` blocks in production code log the failure. No silent exception swallowing exists in any production project.
 
 ### Pattern
 
 ```csharp
-// Disposal path — failure is expected and non-fatal
+// Disposal path — failure is expected and non-fatal, but logged
 try { await _ws.CloseAsync(...); }
-catch { /* WebSocket may already be faulted — disposing anyway */ }
+catch (Exception ex) { _logger?.LogWarning("WebSocket close failed: {Error}", ex.Message); }
 ```
 
 ### Categories
 
-| Category | Example | Comment Style |
-|----------|---------|---------------|
-| Disposal cleanup | WebSocket close during Dispose | "disposing anyway" |
-| Listener cleanup | HttpListener.Stop in finally | "listener may already be stopped" |
-| Process enumeration | Process exited before query | "process may have exited" |
-| File rotation | Delete old rotation files | "old rotation file may be locked" |
-| Platform operations | Clipboard/screen capture | "may not be installed" |
+| Category | Example | Behavior |
+|----------|---------|----------|
+| Disposal cleanup | WebSocket close during Dispose | Logged at warning level |
+| Listener cleanup | HttpListener.Stop in finally | Logged at warning level |
+| Audit writes | File I/O failure in audit logger | Logged + failure counter incremented |
+| File rotation | Delete old rotation files | Logged at warning level |
+| Custody writes | Record write failure | Logged via injected ILogger |
 
 ## Health Check
 
@@ -239,7 +249,7 @@ curl http://localhost:9100/health
 
 ```dockerfile
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3
-  CMD curl -sf http://localhost:9100/health | grep -q '"status":"healthy"' || exit 1
+  CMD wget -q --spider http://localhost:9100/health/live || exit 1
 ```
 
 ## Logging Standards
@@ -265,12 +275,17 @@ _logger.LogError("Max reconnect ({Max}) reached. Error: {Error}", maxAttempts, e
 
 ### Unit Tests
 
-100 tests covering:
+181 tests covering:
 - NMCP binary protocol (frame serialization, header parsing)
-- Custody trail (hash chain, Merkle tree, correlation tracking)
+- Custody trail (hash chain, Merkle tree, correlation tracking, binary serialization)
+- Custody server (log store, query engine, multi-drone storage)
 - Circuit breaker (state transitions, thresholds, recovery)
 - MCP server (tool registration, JSON-RPC, auth)
-- Autonomy engine (rule evaluation, triggers)
+- Autonomy engine (rule evaluation, triggers, event bus)
+- Relay server (file upload/download, rate limiting, WebSocket E2E)
+- Drone.System (command execution, input validation, system info)
+- Drone.Native FFI (graceful degradation, Merkle frame validation)
+- Concurrency stress tests (EventBus, CustodyChain, AuditLogger, LogStore)
 
 ### Running Tests
 
@@ -281,6 +296,90 @@ dotnet test tests/Drone.Tests/Drone.Tests.csproj
 # E2E tests (requires running agent)
 dotnet run --project tests/Drone.E2E/Drone.E2E.csproj
 ```
+
+## Additional Security Measures
+
+### Rate Limiting
+
+| Component | Limit | Scope |
+|-----------|-------|-------|
+| MCP WebSocket | 20 req/s per client | Per-connection |
+| EmbeddedFileServer | 30 req/s per IP | Per-IP token bucket |
+| MessengerRelay | Configurable (default 30 msg/s) | Per-drone token bucket |
+| RelayServer | 64 concurrent requests | Global semaphore |
+
+### WebSocket Send Locks
+
+Every WebSocket connection uses per-client `SemaphoreSlim` write locks to prevent concurrent `SendAsync` corruption:
+
+| Component | Lock Type |
+|-----------|-----------|
+| `McpServer` | Per-client `SemaphoreSlim` in `_clientWriteLocks` |
+| `MessengerRelay` | Per-client `SemaphoreSlim` in `_clientSendLocks` |
+| `RemoteBridge` | Per-connection `SemaphoreSlim` in `_sendLocks` |
+| `EmbeddedRelayFileServer` | Per-client `SemaphoreSlim` in `_notificationSendLocks` |
+| `VelocityConnection` | Instance-level `_wsSendLock` |
+| `MessengerConnector` | Instance-level `_sendLock` |
+| `RemoteConnector` | Instance-level `_sendLock` |
+
+### Message Size Limits
+
+All WebSocket receive loops enforce maximum message sizes to prevent memory exhaustion:
+
+| Component | Limit |
+|-----------|-------|
+| `McpServer` | 10 MB |
+| `VelocityConnection` | 10 MB |
+| `MessengerConnector` | 10 MB |
+| `RemoteConnector` | 64 MB |
+| `CustodyServerHost` | 50 MB |
+| `MessengerRelay` | 256 KB |
+
+### Constant-Time Comparisons
+
+All security-critical comparisons use `CryptographicOperations.FixedTimeEquals`:
+
+- MCP auth tokens (`McpServer.SecureCompare`)
+- Relay API keys (`RelayServer.SecureCompare`)
+- File server API keys (`EmbeddedFileServer`)
+- Custody record hash verification (`CustodyRecord.VerifyHash`, `VerifyChain`)
+- Custody binary Merkle root verification (`CustodyBinarySerializer`)
+- Custody chain Merkle root verification (`CustodyChain`, `CustodyLogStore`)
+
+### Security Headers
+
+All HTTP endpoints include security headers:
+
+| Header | Value | Endpoints |
+|--------|-------|-----------|
+| `X-Content-Type-Options` | `nosniff` | MCP health, CustodyServer query/health |
+| `X-Frame-Options` | `DENY` | MCP health, CustodyServer query/health |
+| `Cache-Control` | `no-store` | MCP health, CustodyServer query/health |
+
+### TLS Enforcement
+
+The MCP WebSocket server refuses to start without TLS unless explicitly opted out:
+
+```bash
+# Production: use HTTPS URL
+DRONE_MCP_URL=https://drone.example.com:9100
+
+# Development: explicit opt-out required
+DRONE_ALLOW_INSECURE_HTTP=1 DRONE_MCP_URL=http://0.0.0.0:9100
+```
+
+### Supply Chain Security
+
+- **CI actions SHA-pinned**: All GitHub Actions reference specific commit SHAs, not mutable tags
+- **DLL integrity manifest**: `Drone.Native/checksums.sha256` contains SHA-256 hashes of pre-built native DLLs
+- **Dependabot**: Automated dependency updates for NuGet, GitHub Actions, and Cargo
+- **Deploy gate**: CI deploy workflow requires build+test job to pass first
+
+### Custody Trail Integrity
+
+- **Length-prefixed hash encoding**: `CustodyRecord.ComputeHash()` uses binary length-prefixed fields instead of delimiter-separated strings, preventing field boundary ambiguity
+- **Constant-time Merkle verification**: All Merkle root comparisons use `FixedTimeEquals`
+- **TOCTOU guards**: Shared memory state transitions re-verify state before committing
 
 ## Production Checklist
 

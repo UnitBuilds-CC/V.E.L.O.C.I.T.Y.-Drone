@@ -177,6 +177,25 @@ MCP WebSocket server configuration.
 | — | `DRONE_AUDIT_LOG` | `/data/audit/drone-audit.jsonl` | General audit log path (non-custody). |
 | — | `DRONE_ALLOWED_PATHS` | `/data` | Comma-separated list of allowed file system paths. |
 | — | `DRONE_SHARE_PATH` | _(none)_ | Shared files storage path. |
+| — | `DRONE_ALLOW_INSECURE_HTTP` | _(not set)_ | Set to `1` to allow MCP WebSocket without TLS. Required for `http://` URLs. |
+
+## Relay Server
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `Relay.Enabled` | — | auto (by role) | Enable the relay server. Auto-set by `DRONE_ROLE`. |
+| `Relay.Port` | `DRONE_RELAY_PORT` | `9200` | Relay server listen port. |
+| `Relay.ApiKey` | `DRONE_RELAY_KEY` | `""` | Shared API key for drone authentication. |
+| `Relay.RelayUrl` | `DRONE_RELAY_URL` | `""` | WebSocket URL of external relay (for client role). |
+| `Relay.MaxMessagesPerSecond` | `DRONE_RELAY_RATE_LIMIT` | `30` | Per-drone message rate limit (0 = unlimited). |
+| `Relay.TlsCertificatePath` | `DRONE_RELAY_TLS_CERT` | `""` | PFX certificate path for TLS. |
+| `Relay.TlsCertificatePassword` | `DRONE_RELAY_TLS_PASS` | `""` | PFX certificate password. **Set via env var only, never in config.** |
+
+## Drone Role
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `Role` | `DRONE_ROLE` | `standalone` | Drone role: `standalone` (both server+client), `server` (hosts relay), `client` (connects to relay). |
 
 ## Docker Environment
 
@@ -184,16 +203,11 @@ When running in Docker (`DRONE_MODE=headless`), these are the default environmen
 
 ```dockerfile
 ENV DRONE_MODE=headless
-ENV DRONE_ID=Drone
 ENV DRONE_MCP_URL=http://0.0.0.0:9100
-ENV DRONE_MCP_TOKEN=""
-ENV DRONE_MCP_TLS=0
-ENV DRONE_AUDIT_LOG=/data/audit/drone-audit.jsonl
-ENV DRONE_WS_URL=""
-ENV DRONE_ALLOWED_PATHS=/data
-ENV Drone__Uplink__Transport=auto
-ENV Drone__Uplink__BufferSize=4194304
+ENV DRONE_ALLOW_INSECURE_HTTP=1
 ```
+
+The Docker image runs `Drone.Agent.Headless` — a cross-platform entry point with no WinForms dependency.
 
 Override at runtime:
 ```bash
