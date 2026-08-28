@@ -145,6 +145,13 @@ public class CrossPlatformProcessManager : IProcessManager
 
     public async Task<CommandResult> RunCommandAsync(string command, string arguments, string? workingDir = null, CancellationToken ct = default)
     {
+        if (string.IsNullOrWhiteSpace(command))
+            return new CommandResult(-1, "", "Command cannot be empty", TimeSpan.Zero);
+        if (command.Length > 8192)
+            return new CommandResult(-1, "", "Command exceeds maximum length", TimeSpan.Zero);
+        if (command.Contains('\0') || (arguments != null && arguments.Contains('\0')))
+            return new CommandResult(-1, "", "Command contains invalid characters", TimeSpan.Zero);
+
         var sw = Stopwatch.StartNew();
         string shell, shellArgs;
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) { shell = "cmd.exe"; shellArgs = "/c " + command + " " + arguments; }

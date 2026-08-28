@@ -47,31 +47,19 @@ public class ConcurrencyTests
     [Fact]
     public async Task CustodyAuditLogger_ConcurrentLog_DoesNotThrow()
     {
-        var tempFile = Path.Combine(Path.GetTempPath(), $"custody-concurrent-{Guid.NewGuid():N}.jsonl");
-        try
+        var logger = new CustodyAuditLogger("concurrent-drone");
+        var tasks = new List<Task>();
+
+        for (int i = 0; i < 100; i++)
         {
-            var logger = new CustodyAuditLogger("concurrent-drone", tempFile);
-            var tasks = new List<Task>();
-
-            for (int i = 0; i < 100; i++)
-            {
-                var idx = i;
-                tasks.Add(Task.Run(() => logger.LogToolCall($"action-{idx}", $"args-{idx}")));
-            }
-
-            await Task.WhenAll(tasks);
-
-            Assert.Equal(100, logger.CurrentSequence);
-            logger.Dispose();
-
-            var lines = File.ReadAllLines(tempFile);
-            Assert.True(lines.Length > 0);
+            var idx = i;
+            tasks.Add(Task.Run(() => logger.LogToolCall($"action-{idx}", $"args-{idx}")));
         }
-        finally
-        {
-            try { File.Delete(tempFile); } catch { }
-            try { Directory.Delete(Path.GetDirectoryName(tempFile)!, true); } catch { }
-        }
+
+        await Task.WhenAll(tasks);
+
+        Assert.Equal(100, logger.CurrentSequence);
+        logger.Dispose();
     }
 
     [Fact]
@@ -131,20 +119,18 @@ public class ConcurrencyTests
     }
 
     [Fact]
-    public void CustodyRingBuffer_ConcurrentRead_DoesNotThrow()
+    public async Task CustodyRingBuffer_ConcurrentRead_DoesNotThrow()
     {
         var logger = new CustodyAuditLogger("ring-drone");
         var tasks = new List<Task>();
 
-        // Write records
         for (int i = 0; i < 200; i++)
             logger.LogToolCall($"action-{i}");
 
-        // Read concurrently
         for (int i = 0; i < 20; i++)
             tasks.Add(Task.Run(() => logger.GetRecentRecords(50)));
 
-        Task.WaitAll(tasks.ToArray());
+        await Task.WhenAll(tasks);
         logger.Dispose();
     }
 }

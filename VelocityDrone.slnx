@@ -11,4 +11,5 @@
   <Project Path="Drone.Native/Drone.Native.csproj" />
   <Project Path="Drone.Services/Drone.Services.csproj" />
   <Project Path="Drone.System/Drone.System.csproj" />
+  <Project Path="DeltaBench/DeltaBench.csproj" />
 </Solution>

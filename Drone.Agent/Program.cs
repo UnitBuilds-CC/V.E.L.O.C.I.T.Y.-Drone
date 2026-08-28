@@ -756,8 +756,9 @@ public class DroneLogger : Drone.Core.ILogger
 {
     private readonly Microsoft.Extensions.Logging.ILogger _inner;
     public DroneLogger(Microsoft.Extensions.Logging.ILogger inner) => _inner = inner;
-    public void LogInformation(string message, params object[] args) => _inner.LogInformation(message, args);
-    public void LogWarning(string message, params object[] args) => _inner.LogWarning(message, args);
-    public void LogError(string message, params object[] args) => _inner.LogError(message, args);
-    public void LogDebug(string message, params object[] args) => _inner.LogDebug(message, args);
+    public void LogInformation(string message, params object[] args) => _inner.LogInformation("[{Timestamp:HH:mm:ss}] " + message, PrependTimestamp(args));
+    public void LogWarning(string message, params object[] args) => _inner.LogWarning("[{Timestamp:HH:mm:ss}] " + message, PrependTimestamp(args));
+    public void LogError(string message, params object[] args) => _inner.LogError("[{Timestamp:HH:mm:ss}] " + message, PrependTimestamp(args));
+    public void LogDebug(string message, params object[] args) => _inner.LogDebug("[{Timestamp:HH:mm:ss}] " + message, PrependTimestamp(args));
+    private static object[] PrependTimestamp(object[] args) => args;
 }

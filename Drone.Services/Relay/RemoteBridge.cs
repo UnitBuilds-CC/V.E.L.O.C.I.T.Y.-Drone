@@ -18,7 +18,6 @@ public class RemoteBridge : IAsyncDisposable
     private readonly ConcurrentDictionary<string, WebSocket> _targets = new();
     private readonly ConcurrentDictionary<string, WebSocket> _controllers = new();
     private readonly ConcurrentDictionary<WebSocket, SemaphoreSlim> _sendLocks = new();
-    private CancellationTokenSource? _cts;
 
     public int TargetCount => _targets.Count;
     public int ControllerCount => _controllers.Count;
@@ -129,8 +128,6 @@ public class RemoteBridge : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        _cts?.Cancel();
-
         foreach (var (_, ws) in _targets)
         {
             try { await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Bridge shutting down", CancellationToken.None); }
@@ -147,6 +144,5 @@ public class RemoteBridge : IAsyncDisposable
 
         _targets.Clear();
         _controllers.Clear();
-        _cts?.Dispose();
     }
 }
