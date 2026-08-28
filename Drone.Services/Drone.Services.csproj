@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Drone.Services</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Drone.Core\Drone.Core.csproj" />
+    <ProjectReference Include="..\Drone.Native\Drone.Native.csproj" />
+    <ProjectReference Include="..\Drone.System\Drone.System.csproj" />
+  </ItemGroup>
+</Project>

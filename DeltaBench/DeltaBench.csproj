@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Drone.Core\Drone.Core.csproj" />
+    <ProjectReference Include="..\Drone.Native\Drone.Native.csproj" />
+    <ProjectReference Include="..\Drone.System\Drone.System.csproj" />
+    <ProjectReference Include="..\Drone.Services\Drone.Services.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="..\Drone.Native\velocity_delta.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="..\Drone.Native\velocity_v2_ffi.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+</Project>

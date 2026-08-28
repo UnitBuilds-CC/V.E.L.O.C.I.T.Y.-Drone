@@ -1,0 +1,83 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/drone-core",
+    "crates/drone-mcp",
+    "crates/drone-system",
+    "crates/drone-services",
+    "crates/drone-autonomy",
+    "crates/drone-agent",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# SHA-256 for Merkle tree and custody chain
+sha2 = "0.10"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# HTTP / WebSocket
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+tokio-tungstenite = "0.24"
+
+# Config
+toml = "0.8"
+
+# Cross-platform
+dirs = "5"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Hex encoding
+hex = "0.4"
+
+# UUID generation
+uuid = { version = "1", features = ["v4"] }
+
+# HTTP client (for connectors)
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+
+# Base64 encoding
+base64 = "0.22"
+
+# Async trait
+async-trait = "0.1"
+
+# Futures utilities
+futures-util = "0.3"
+
+# Hostname resolution
+hostname = "0.4"
+
+# Internal crate dependencies
+drone-core = { path = "crates/drone-core" }
+drone-mcp = { path = "crates/drone-mcp" }
+drone-system = { path = "crates/drone-system" }
+drone-services = { path = "crates/drone-services" }
+drone-autonomy = { path = "crates/drone-autonomy" }
+
+[profile.release]
+opt-level = "z"   # Optimize for size (single binary)
+lto = true
+codegen-units = 1
+strip = true

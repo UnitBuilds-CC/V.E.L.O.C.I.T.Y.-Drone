@@ -1,0 +1,28 @@
+[package]
+name = "drone-agent"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "velocity-drone"
+path = "src/main.rs"
+
+[dependencies]
+drone-core = { workspace = true }
+drone-mcp = { workspace = true }
+drone-system = { workspace = true }
+drone-services = { workspace = true }
+drone-autonomy = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = { workspace = true }
+hostname = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+
+[build-dependencies]
+embed-manifest = "1.4"

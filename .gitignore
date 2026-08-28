@@ -1,0 +1,62 @@
+﻿# ===========================
+# Rust
+# ===========================
+**/target/
+**/*.rs.bk
+
+# ===========================
+# .NET
+# ===========================
+**/bin/
+**/obj/
+**/*.user
+**/*.suo
+**/*.cache
+**/*.vs/
+**/TestResults/
+**/*.nupkg
+**/packages/
+
+# ===========================
+# Build artifacts
+# ===========================
+publish/
+publish-new/
+release-*/
+*.zip
+build-test/
+build-v2/
+build-v3/
+**/installer/output/
+**/installer/build/
+installer/*.exe
+*.log
+
+# ===========================
+# IDE / Editor
+# ===========================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ===========================
+# OS
+# ===========================
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# ===========================
+# Secrets
+# ===========================
+*.env
+appsettings.Production.json
+config/secrets.json
+
+# ===========================
+# Node
+# ===========================
+node_modules/

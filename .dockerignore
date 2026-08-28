@@ -1,0 +1,36 @@
+# Build artifacts
+**/bin/
+**/obj/
+**/target/
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Git
+.git/
+.gitignore
+
+# Rust build artifacts
+**/target/
+
+# Test results
+**/TestResults/
+
+# Node modules
+**/node_modules/
+
+# Documentation
+*.md
+LICENSE
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose*.yml

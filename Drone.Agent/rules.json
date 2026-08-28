@@ -1,0 +1,51 @@
+﻿[
+  {
+    "Name": "LogAllEvents",
+    "Trigger": "*",
+    "Action": "log",
+    "ActionParams": { "level": "info" },
+    "Enabled": true
+  },
+  {
+    "Name": "AutoReplyToMessages",
+    "Trigger": "MessageReceived",
+    "Action": "auto_reply",
+    "ActionParams": { "reply": "Acknowledged by Velocity Drone" },
+    "Enabled": false
+  },
+  {
+    "Name": "SyncOnFileChange",
+    "Trigger": "FileChanged",
+    "Action": "file_sync",
+    "ActionParams": { "localFolder": "./sync", "remoteFolder": "/drone/sync" },
+    "Enabled": false
+  },
+  {
+    "Name": "MonitorScreen",
+    "Trigger": "ScreenChanged",
+    "Action": "screen_monitor",
+    "ActionParams": { "threshold": "0.1" },
+    "Enabled": false
+  },
+  {
+    "Name": "AlertAIOnSystemEvents",
+    "Trigger": "SystemAlert",
+    "Action": "notify_ai",
+    "ActionParams": {},
+    "Enabled": false
+  },
+  {
+    "Name": "RunOnProcessStart",
+    "Trigger": "ProcessStarted",
+    "Action": "log",
+    "ActionParams": { "level": "warning" },
+    "Enabled": false
+  },
+  {
+    "Name": "ScheduledHealthCheck",
+    "Trigger": "ScheduledTask",
+    "Action": "run_command",
+    "ActionParams": { "command": "echo", "args": "health check" },
+    "Enabled": false
+  }
+]
