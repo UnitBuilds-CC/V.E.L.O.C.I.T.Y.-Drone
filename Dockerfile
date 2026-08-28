@@ -20,6 +20,7 @@ WORKDIR /build
 # Copy solution and project files first (restore cache layer)
 COPY VelocityDrone.slnx Directory.Build.props global.json ./
 COPY Drone.Agent/Drone.Agent.csproj Drone.Agent/
+COPY Drone.Agent.Headless/Drone.Agent.Headless.csproj Drone.Agent.Headless/
 COPY Drone.Core/Drone.Core.csproj Drone.Core/
 COPY Drone.MCP/Drone.MCP.csproj Drone.MCP/
 COPY Drone.Native/Drone.Native.csproj Drone.Native/
@@ -29,6 +30,7 @@ COPY Drone.Autonomy/Drone.Autonomy.csproj Drone.Autonomy/
 COPY Drone.Custody/Drone.Custody.csproj Drone.Custody/
 COPY tests/Drone.Tests/Drone.Tests.csproj tests/Drone.Tests/
 COPY tests/Drone.E2E/Drone.E2E.csproj tests/Drone.E2E/
+COPY DeltaBench/DeltaBench.csproj DeltaBench/
 
 # Restore packages (EnableWindowsTargeting allows cross-compile from Linux)
 RUN dotnet restore VelocityDrone.slnx /p:EnableWindowsTargeting=true
@@ -37,8 +39,8 @@ RUN dotnet restore VelocityDrone.slnx /p:EnableWindowsTargeting=true
 COPY . .
 
 # Build and publish (skip Rust build — using pre-built native lib from stage 1)
-RUN dotnet publish Drone.Agent/Drone.Agent.csproj -c Release -o /app/publish \
-    /p:SkipRust=true /p:PublishSingleFile=false /p:EnableWindowsTargeting=true
+RUN dotnet publish Drone.Agent.Headless/Drone.Agent.Headless.csproj -c Release -o /app/publish \
+    /p:SkipRust=true /p:PublishSingleFile=false
 
 # --- Stage 3: Runtime ---
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
@@ -46,6 +48,9 @@ WORKDIR /app
 
 # Create non-root user for security
 RUN groupadd -r drone && useradd -r -g drone -m drone
+
+# Install wget for healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends wget && rm -rf /var/lib/apt/lists/*
 
 # Copy published app
 COPY --from=dotnet-builder /app/publish .
@@ -71,4 +76,4 @@ ENV DRONE_MODE=headless
 ENV DRONE_MCP_URL=http://0.0.0.0:9100
 ENV DRONE_ALLOW_INSECURE_HTTP=1
 
-ENTRYPOINT ["dotnet", "velocity-drone.dll"]
+ENTRYPOINT ["dotnet", "velocity-drone-headless.dll"]
