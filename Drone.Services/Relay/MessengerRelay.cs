@@ -59,10 +59,13 @@ public class MessengerRelay : IAsyncDisposable
         _clientCts.TryAdd(username, connectionCts);
         _clientSendLocks[username] = new SemaphoreSlim(1, 1);
 
-        // Start heartbeat if not already running
-        if (_heartbeatTask == null || _heartbeatTask.IsCompleted)
+        // Start heartbeat if not already running (atomic check-and-set)
+        var newHeartbeat = Task.Run(() => HeartbeatLoop(connectionCts.Token));
+        var existing = Interlocked.CompareExchange(ref _heartbeatTask, newHeartbeat, null);
+        if (existing != null && !existing.IsCompleted)
         {
-            _heartbeatTask = Task.Run(() => HeartbeatLoop(connectionCts.Token));
+            // Another connection already started the heartbeat — cancel ours
+            newHeartbeat.Dispose();
         }
 
         var chunkBuffer = new byte[16384];

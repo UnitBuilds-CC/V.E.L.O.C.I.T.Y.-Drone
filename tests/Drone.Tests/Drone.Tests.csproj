@@ -22,5 +22,6 @@
     <ProjectReference Include="..\..\Drone.MCP\Drone.MCP.csproj" />
     <ProjectReference Include="..\..\Drone.Services\Drone.Services.csproj" />
     <ProjectReference Include="..\..\Drone.Autonomy\Drone.Autonomy.csproj" />
+    <ProjectReference Include="..\..\Drone.Custody\Drone.Custody.csproj" />
   </ItemGroup>
 </Project>

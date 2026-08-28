@@ -112,15 +112,12 @@ public static class CustodyBinarySerializer
             records[i] = DeserializeRecord(data, recordOffset);
         }
 
-        // Verify Merkle root
+        // Verify Merkle root (constant-time comparison)
         var computedRoot = CustodyChain.ComputeBatchMerkleRoot(records);
         var computedRootBytes = string.IsNullOrEmpty(computedRoot) ? new byte[32] : Convert.FromHexString(computedRoot);
 
-        for (int i = 0; i < 32; i++)
-        {
-            if (expectedRoot[i] != computedRootBytes[i])
-                return null; // Merkle root mismatch
-        }
+        if (!global::System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(expectedRoot, computedRootBytes))
+            return null;
 
         return records;
     }

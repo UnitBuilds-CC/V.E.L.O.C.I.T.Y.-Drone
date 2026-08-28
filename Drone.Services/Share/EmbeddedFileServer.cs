@@ -19,6 +19,9 @@ public class EmbeddedFileServer : IAsyncDisposable
 
     private const long MaxUploadSize = 100L * 1024 * 1024;
 
+    private readonly global::System.Collections.Concurrent.ConcurrentDictionary<string, RateLimitEntry> _rateLimits = new();
+    private const int MaxRequestsPerSecond = 30;
+
     public EmbeddedFileServer(ILogger logger, string storagePath, string listenUrl, string apiKey)
     {
         _logger = logger;
@@ -75,6 +78,16 @@ public class EmbeddedFileServer : IAsyncDisposable
                     await WriteJson(ctx, new { error = "Unauthorized" });
                     return;
                 }
+            }
+
+            // Rate limiting
+            var clientIp = ctx.Request.RemoteEndPoint?.Address.ToString() ?? "unknown";
+            var entry = _rateLimits.GetOrAdd(clientIp, _ => new RateLimitEntry());
+            if (!entry.TryAcquire(MaxRequestsPerSecond))
+            {
+                ctx.Response.StatusCode = 429;
+                await WriteJson(ctx, new { error = "Rate limit exceeded" });
+                return;
             }
 
             var path = ctx.Request.Url?.AbsolutePath ?? "";
@@ -340,5 +353,38 @@ public class EmbeddedFileServer : IAsyncDisposable
             return true;
         }
         catch { return false; }
+    }
+}
+
+internal class RateLimitEntry
+{
+    private int _tokens;
+    private long _lastRefillTicks;
+    private readonly object _lock = new();
+    private readonly int _maxTokens;
+
+    public RateLimitEntry(int maxTokens = 30)
+    {
+        _maxTokens = maxTokens;
+        _tokens = maxTokens;
+        _lastRefillTicks = global::System.DateTime.UtcNow.Ticks;
+    }
+
+    public bool TryAcquire(int refillRatePerSecond)
+    {
+        lock (_lock)
+        {
+            var now = global::System.DateTime.UtcNow.Ticks;
+            var elapsed = (now - _lastRefillTicks) / (double)global::System.TimeSpan.TicksPerSecond;
+            _tokens = (int)global::System.Math.Min(_maxTokens, _tokens + elapsed * refillRatePerSecond);
+            _lastRefillTicks = now;
+
+            if (_tokens >= 1)
+            {
+                _tokens--;
+                return true;
+            }
+            return false;
+        }
     }
 }
