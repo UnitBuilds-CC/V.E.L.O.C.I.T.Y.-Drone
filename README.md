@@ -8,7 +8,7 @@ Autonomous agent for remote system management. Runs as a background tray agent o
 # Build
 dotnet build VelocityDrone.slnx /p:SkipRust=true
 
-# Test (100 unit tests + 10 E2E)
+# Test (181 unit tests + 10 E2E)
 dotnet test tests/Drone.Tests/Drone.Tests.csproj
 dotnet run --project tests/Drone.E2E/Drone.E2E.csproj
 
@@ -50,14 +50,15 @@ See [Architecture](docs/architecture.md) for the full module map, dependency gra
 | Project | Description |
 |---------|-------------|
 | **Drone.Agent** | Entry point. Tray app, DI wiring, Messenger command handler, MCP server host. Windows-specific (WinForms). |
+| **Drone.Agent.Headless** | Headless entry point for Docker/Linux. No WinForms dependency. Cross-platform. |
 | **Drone.Core** | Shared types: `ILogger`, `DroneConfig`, `EventBus`, `CircuitBreaker`, NMCP binary frame protocol, custody trail primitives. |
-| **Drone.Services** | Connectors: `MessengerConnector`, `RemoteConnector`, `ShareConnector`, `CustodyReporter`, `DeltaScreenPipeline`. |
+| **Drone.Services** | Connectors: `MessengerConnector`, `RemoteConnector`, `ShareConnector`, `CustodyReporter`, `DeltaScreenPipeline`. Relay server. |
 | **Drone.MCP** | MCP server: tool registration, JSON-RPC 2.0, WebSocket transport, NMCP buffer management. |
 | **Drone.System** | Platform abstractions: `IScreenCapture`, `IInputSimulator`, `IWindowManager`, `IProcessManager`. Windows/Linux/macOS. |
 | **Drone.Autonomy** | Rule engine: `BehaviorRule` triggers + `ActionHandler` responses. `EventBus`-driven autonomous behavior. |
 | **Drone.Native** | Rust FFI bindings: delta frame serialization, WebP compression, native performance-critical paths. |
 | **Drone.Custody** | Standalone custody server: WebSocket ingestion, hash-chain validation, HTTP query API, real-time stream broadcast. |
-| **Drone.Tests** | xUnit tests: 100 tests covering core protocol, custody trail, circuit breaker, MCP server, autonomy engine, event bus. |
+| **Drone.Tests** | xUnit tests: 181 tests covering core protocol, custody trail, circuit breaker, MCP server, autonomy engine, relay, system, native FFI, concurrency. |
 | **Drone.E2E** | End-to-end integration tests: MCP handshake, WebSocket transport, auth, custody trail pipeline. |
 | **DeltaBench** | Benchmarking project for delta frame serialization and compression performance. |
 
@@ -140,12 +141,17 @@ Edit `Drone.Agent/appsettings.json` or set environment variables:
 |-------------|-------------|
 | `DRONE_ID` | Override drone identity |
 | `DRONE_MODE` | `full` (default) or `headless` |
+| `DRONE_ROLE` | `standalone` (default), `server`, or `client` |
 | `DRONE_WS_URL` | Uplink WebSocket URL |
 | `DRONE_MCP_URL` | MCP WebSocket listen URL (default `http://+:9100`) |
 | `DRONE_MCP_TOKEN` | MCP auth token |
+| `DRONE_ALLOW_INSECURE_HTTP` | Set to `1` to allow non-TLS MCP (required for `http://` URLs) |
 | `DRONE_CUSTODY_PATH` | Local custody log file path |
 | `DRONE_CUSTODY_SERVER` | CustodyServer URL for streaming |
 | `DRONE_SHUTDOWN_TIMEOUT` | Graceful shutdown timeout in seconds (default: 15) |
+| `DRONE_RELAY_PORT` | Relay server port (default: 9200) |
+| `DRONE_RELAY_KEY` | Relay API key for drone authentication |
+| `DRONE_ALLOWED_PATHS` | Restrict file access to specific paths |
 | `CUSTODY_STORAGE_PATH` | Server-side storage directory |
 | `CUSTODY_LISTEN_URL` | CustodyServer listen URL |
 
@@ -200,11 +206,17 @@ dotnet run --project tests/Drone.E2E/Drone.E2E.csproj
 | `CustodyChainTests` | 7 | Sequence increment, hash chaining, chain validation, removal/reorder detection, state reset |
 | `CorrelationTrackerTests` | 5 | ID generation, step counting, completion, active tracking |
 | `CustodyAuditLoggerTests` | 6 | Chained records, ring buffer, sequence filtering, events, cross-machine correlation |
+| `CustodyLogStoreTests` | 8 | Record storage, hash validation, chain continuity, multi-drone, queries, eviction |
+| `CustodyQueryEngineTests` | 5 | Query by drone/event type, limit, verified trail, summary |
 | `CoreTests` | 8 | NMCP frame protocol, config validation |
 | `McpServerTests` | 6 | Tool registration, JSON-RPC protocol, error handling |
 | `BehaviorRuleTests` | 5 | Trigger matching, conditions, action params |
 | `EventBusTests` | 4 | Pub/sub, filtering, error isolation |
 | `CircuitBreakerTests` | 12 | State transitions, thresholds, recovery, async variants |
+| `RelayServerTests` | 20+ | File upload/download/delete, rate limiting, auth, WebSocket E2E |
+| `SystemTests` | 7 | Command execution, input validation, system info, process listing |
+| `NativeTests` | 9 | FFI graceful degradation, Merkle frame validation, constants |
+| `ConcurrencyTests` | 5 | EventBus, CustodyChain, AuditLogger, LogStore, ring buffer stress |
 | `E2E Tests` | 10 | MCP handshake, tool calls, WebSocket transport, auth, custody trail |
 
 ## Deployment

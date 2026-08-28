@@ -35,6 +35,7 @@ docker build -t velocity-drone:latest .
 docker run -d --name drone \
   -e DRONE_MODE=headless \
   -e DRONE_MCP_TOKEN=your-secret-token \
+  -e DRONE_ALLOW_INSECURE_HTTP=1 \
   -p 9100:9100 \
   velocity-drone:latest
 ```
@@ -129,9 +130,9 @@ Send these as direct messages to the drone via Velocity Messenger:
 
 | Command | Example | Description |
 |---------|---------|-------------|
-| `run <command>` | `run dir` | Execute a shell command (60s timeout, blocked commands: format, del /s, rm -rf, mkfs, dd if=) |
+| `run <command>` | `run dir` | Execute a shell command (60s timeout, blocked: format, del /s, rm -rf, mkfs, dd, diskpart, reg delete, powershell -enc, fdisk, parted) |
 
-**Security:** Commands containing `| & ; \` $ ( )` are rejected to prevent shell injection.
+**Security:** Commands containing `| & ; \` $ ( ) > < ^ % !` or newlines are rejected to prevent shell injection. Commands with null bytes or exceeding 8192 characters are also rejected.
 
 ### Examples
 
@@ -336,18 +337,21 @@ Connect via any MCP client and call these tools using JSON-RPC 2.0.
 
 ### Self-Update
 
-1. **Place new binary** in the share directory:
+1. **Place new binary and checksum** in the share directory:
    ```bash
    # On the share server or local share path
    cp velocity-drone-new.exe /share/velocity-drone-new.exe
+   # Generate and place the SHA-256 checksum (required for verification)
+   sha256sum /share/velocity-drone-new.exe | awk '{print $1}' > /share/velocity-drone-new.exe.sha256
    ```
 2. **Send update command** via Messenger:
    ```
    > update
    ```
 3. The agent will:
-   - Download the new binary
-   - Verify SHA-256 checksum
+   - Verify the `.sha256` sidecar file exists (rejects update if missing)
+   - Compute SHA-256 of the new binary
+   - Compare against the expected checksum (rejects on mismatch)
    - Run the update script
    - Trigger graceful shutdown
    - The update script replaces the binary and restarts
@@ -450,7 +454,13 @@ Autonomy rules define automated behavior based on events. Rules are loaded from 
 ### Monitoring Health
 
 ```bash
-# Basic health check
+# Liveness probe (is the process alive?)
+curl http://localhost:9100/health/live
+
+# Readiness probe (can it accept traffic?)
+curl http://localhost:9100/health/ready
+
+# Full health check (connections, custody chain, tool count)
 curl http://localhost:9100/health
 
 # Check connection status
