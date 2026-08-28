@@ -11,6 +11,7 @@ namespace Drone.Custody;
 public class CustodyLogStore : IDisposable
 {
     private readonly string _basePath;
+    private readonly Drone.Core.ILogger? _logger;
     private readonly object _lock = new();
     private readonly Dictionary<string, StreamWriter> _droneWriters = new();
     private StreamWriter? _mergedWriter;
@@ -30,9 +31,10 @@ public class CustodyLogStore : IDisposable
     /// <summary>Max records in merged index before evicting.</summary>
     private const int MaxInMemoryMerged = 100_000;
 
-    public CustodyLogStore(string basePath, long maxFileSizeMb = 100)
+    public CustodyLogStore(string basePath, long maxFileSizeMb = 100, Drone.Core.ILogger? logger = null)
     {
         _basePath = basePath;
+        _logger = logger;
         _maxFileSizeBytes = maxFileSizeMb * 1024 * 1024;
 
         if (!Directory.Exists(_basePath))
@@ -280,7 +282,7 @@ public class CustodyLogStore : IDisposable
             writer.WriteLine(record.ToJson());
             writer.Flush();
         }
-        catch { /* write failure is non-fatal */ }
+        catch (Exception ex) { _logger?.LogWarning("Custody drone file write failed: {Error}", ex.Message); }
     }
 
     private void WriteToMergedFile(CustodyRecord record)
@@ -291,7 +293,7 @@ public class CustodyLogStore : IDisposable
             _mergedWriter?.WriteLine(record.ToJson());
             _mergedWriter?.Flush();
         }
-        catch { /* write failure is non-fatal */ }
+        catch (Exception ex) { _logger?.LogWarning("Custody merged file write failed: {Error}", ex.Message); }
     }
 
     private void EnsureMergedWriter()

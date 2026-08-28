@@ -12,22 +12,28 @@ public class AuditLogger : IDisposable
 {
     private readonly string _basePath;
     private readonly long _maxFileSizeBytes;
+    private readonly ILogger? _logger;
     private StreamWriter? _writer;
     private string _currentFilePath = "";
     private DateTime _currentDate;
     private readonly object _lock = new();
     private bool _disposed;
+    private long _failedWrites;
 
     /// <summary>Create an audit logger. Pass null path to disable auditing.</summary>
-    public AuditLogger(string? basePath, long maxFileSizeMb = 50)
+    public AuditLogger(string? basePath, long maxFileSizeMb = 50, ILogger? logger = null)
     {
         _basePath = basePath ?? "";
         _maxFileSizeBytes = maxFileSizeMb * 1024 * 1024;
+        _logger = logger;
         if (!string.IsNullOrEmpty(_basePath))
         {
             EnsureWriter();
         }
     }
+
+    /// <summary>Number of write failures since startup.</summary>
+    public long FailedWrites => _failedWrites;
 
     /// <summary>Whether audit logging is enabled.</summary>
     public bool IsEnabled => !string.IsNullOrEmpty(_basePath);
@@ -86,7 +92,11 @@ public class AuditLogger : IDisposable
                 _writer?.WriteLine(json);
                 _writer?.Flush();
             }
-            catch { /* audit failure must not crash the server */ }
+            catch (Exception ex)
+            {
+                global::System.Threading.Interlocked.Increment(ref _failedWrites);
+                _logger?.LogWarning("Audit write failed: {Error}", ex.Message);
+            }
         }
     }
 
@@ -130,7 +140,7 @@ public class AuditLogger : IDisposable
                 CleanupOldRotations();
             }
         }
-        catch { /* rotation failure is non-fatal */ }
+        catch (Exception ex) { _logger?.LogWarning("Audit log rotation failed: {Error}", ex.Message); }
     }
 
     private string GetFilePath(DateTime date)
@@ -153,10 +163,10 @@ public class AuditLogger : IDisposable
                 .Skip(5); // Keep last 5
             foreach (var old in rotated)
             {
-                try { File.Delete(old); } catch { /* old rotation file may be locked */ }
+                try { File.Delete(old); } catch (Exception ex) { _logger?.LogWarning("Failed to delete old rotation file: {Error}", ex.Message); }
             }
         }
-        catch { /* rotation cleanup failed — non-fatal */ }
+        catch (Exception ex) { _logger?.LogWarning("Rotation cleanup failed: {Error}", ex.Message); }
     }
 
     public void Dispose()

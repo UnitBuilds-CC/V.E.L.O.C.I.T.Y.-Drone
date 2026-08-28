@@ -20,7 +20,7 @@ public class Program
         logger.LogInformation("Storage: {Path}", storagePath);
         logger.LogInformation("Listening: {Url}", listenUrl);
 
-        using var store = new CustodyLogStore(storagePath);
+        using var store = new CustodyLogStore(storagePath, logger: logger);
         await using var server = new CustodyServerHost(store, logger);
 
         var cts = new CancellationTokenSource();
