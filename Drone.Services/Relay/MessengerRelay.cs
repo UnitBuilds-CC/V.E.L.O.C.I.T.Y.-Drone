@@ -18,6 +18,7 @@ public class MessengerRelay : IAsyncDisposable
     private readonly ConcurrentDictionary<string, WebSocket> _clients = new();
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _clientCts = new();
     private readonly ConcurrentDictionary<string, TokenBucket> _rateLimiters = new();
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _clientSendLocks = new();
     private Task? _heartbeatTask;
 
     private const int HeartbeatIntervalSec = 30;
@@ -56,6 +57,7 @@ public class MessengerRelay : IAsyncDisposable
 
         _clients.TryAdd(username, ws);
         _clientCts.TryAdd(username, connectionCts);
+        _clientSendLocks[username] = new SemaphoreSlim(1, 1);
 
         // Start heartbeat if not already running
         if (_heartbeatTask == null || _heartbeatTask.IsCompleted)
@@ -105,6 +107,8 @@ public class MessengerRelay : IAsyncDisposable
             _clients.TryRemove(username, out _);
             _clientCts.TryRemove(username, out var myCts);
             _rateLimiters.TryRemove(username, out _);
+            if (_clientSendLocks.TryRemove(username, out var sendLock))
+                sendLock.Dispose();
             myCts?.Dispose();
             if (ws.State == WebSocketState.Open || ws.State == WebSocketState.CloseReceived)
             {
@@ -149,7 +153,7 @@ public class MessengerRelay : IAsyncDisposable
                         content = root.TryGetProperty("content", out var c) ? c : JsonDocument.Parse("{}").RootElement
                     });
                     var bytes = Encoding.UTF8.GetBytes(envelope);
-                    await targetWs.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, ct);
+                    await SafeSendAsync(to, targetWs, bytes, WebSocketMessageType.Text, ct);
                 }
                 else
                 {
@@ -171,7 +175,7 @@ public class MessengerRelay : IAsyncDisposable
                 {
                     if (name != fromUsername && ws.State == WebSocketState.Open)
                     {
-                        try { await ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, ct); }
+                        try { await SafeSendAsync(name, ws, bytes, WebSocketMessageType.Text, ct); }
                         catch { /* skip failed sends */ }
                     }
                 }
@@ -199,8 +203,16 @@ public class MessengerRelay : IAsyncDisposable
         {
             var json = JsonSerializer.Serialize(message);
             var bytes = Encoding.UTF8.GetBytes(json);
-            await ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, ct);
+            await SafeSendAsync(username, ws, bytes, WebSocketMessageType.Text, ct);
         }
+    }
+
+    private async Task SafeSendAsync(string username, WebSocket ws, byte[] bytes, WebSocketMessageType msgType, CancellationToken ct)
+    {
+        if (!_clientSendLocks.TryGetValue(username, out var sendLock)) return;
+        if (!await sendLock.WaitAsync(TimeSpan.FromSeconds(5), ct)) return;
+        try { await ws.SendAsync(new ArraySegment<byte>(bytes), msgType, true, ct); }
+        finally { sendLock.Release(); }
     }
 
     private async Task HeartbeatLoop(CancellationToken ct)
@@ -215,7 +227,7 @@ public class MessengerRelay : IAsyncDisposable
             {
                 if (ws.State == WebSocketState.Open)
                 {
-                    try { await ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, ct); }
+                    try { await SafeSendAsync(name, ws, bytes, WebSocketMessageType.Text, ct); }
                     catch { /* client gone */ }
                 }
             }

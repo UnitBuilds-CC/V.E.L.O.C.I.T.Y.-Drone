@@ -24,6 +24,7 @@ public class RelayServer : IAsyncDisposable
     private int _totalConnections;
     private DateTime _startedAt;
     private bool _tlsEnabled;
+    private readonly SemaphoreSlim _requestConcurrencyLimit;
 
     // Sub-services
     private MessengerRelay? _messengerRelay;
@@ -40,6 +41,7 @@ public class RelayServer : IAsyncDisposable
         _config = config;
         _droneId = droneId;
         _logger = logger;
+        _requestConcurrencyLimit = new SemaphoreSlim(64, 64);
     }
 
     public async Task StartAsync(CancellationToken ct = default)
@@ -90,7 +92,19 @@ public class RelayServer : IAsyncDisposable
             try
             {
                 var ctx = await _listener.GetContextAsync();
-                _ = Task.Run(() => HandleRequest(ctx, ct));
+                if (!_requestConcurrencyLimit.Wait(0))
+                {
+                    ctx.Response.StatusCode = 503;
+                    var msg = global::System.Text.Encoding.UTF8.GetBytes("{\"error\":\"Server busy\"}");
+                    await ctx.Response.OutputStream.WriteAsync(msg);
+                    ctx.Response.Close();
+                    continue;
+                }
+                _ = Task.Run(async () =>
+                {
+                    try { await HandleRequest(ctx, ct); }
+                    finally { _requestConcurrencyLimit.Release(); }
+                });
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {

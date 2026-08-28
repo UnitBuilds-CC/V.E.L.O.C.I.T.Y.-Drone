@@ -63,13 +63,18 @@ public class EmbeddedFileServer : IAsyncDisposable
     {
         try
         {
-            // Check API key
+            // Check API key (constant-time comparison to prevent timing attacks)
             var providedKey = ctx.Request.Headers["X-Api-Key"] ?? "";
-            if (!string.IsNullOrEmpty(_apiKey) && providedKey != _apiKey)
+            if (!string.IsNullOrEmpty(_apiKey))
             {
-                ctx.Response.StatusCode = 401;
-                await WriteJson(ctx, new { error = "Unauthorized" });
-                return;
+                var providedBytes = global::System.Text.Encoding.UTF8.GetBytes(providedKey);
+                var expectedBytes = global::System.Text.Encoding.UTF8.GetBytes(_apiKey);
+                if (!global::System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(providedBytes, expectedBytes))
+                {
+                    ctx.Response.StatusCode = 401;
+                    await WriteJson(ctx, new { error = "Unauthorized" });
+                    return;
+                }
             }
 
             var path = ctx.Request.Url?.AbsolutePath ?? "";

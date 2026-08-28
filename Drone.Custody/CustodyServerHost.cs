@@ -331,6 +331,9 @@ public class CustodyServerHost : IAsyncDisposable
             context.Response.StatusCode = 200;
             context.Response.ContentType = "application/json";
             context.Response.ContentLength64 = bytes.Length;
+            context.Response.AddHeader("X-Content-Type-Options", "nosniff");
+            context.Response.AddHeader("X-Frame-Options", "DENY");
+            context.Response.AddHeader("Cache-Control", "no-store");
             context.Response.OutputStream.Write(bytes, 0, bytes.Length);
             context.Response.Close();
         }
@@ -357,6 +360,9 @@ public class CustodyServerHost : IAsyncDisposable
         context.Response.StatusCode = 200;
         context.Response.ContentType = "application/json";
         context.Response.ContentLength64 = bytes.Length;
+        context.Response.AddHeader("X-Content-Type-Options", "nosniff");
+        context.Response.AddHeader("X-Frame-Options", "DENY");
+        context.Response.AddHeader("Cache-Control", "no-store");
         context.Response.OutputStream.Write(bytes, 0, bytes.Length);
         context.Response.Close();
     }

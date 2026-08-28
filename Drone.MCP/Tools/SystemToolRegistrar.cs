@@ -46,7 +46,14 @@ public static class SystemToolRegistrar
     private static readonly TimeSpan CommandTimeout = TimeSpan.FromSeconds(60);
 
     /// <summary>Blocked command substrings for security.</summary>
-    private static readonly string[] BlockedCommands = { "format", "del /s", "rm -rf /", "mkfs", "dd if=/dev/zero" };
+    private static readonly string[] BlockedCommands = {
+        "format", "del /s", "rm -rf /", "rm -rf /*", "mkfs", "dd if=/dev/zero",
+        "rm -fr /", "rm -fr /*", ":> /dev/sd", "> /dev/sd",
+        "powershell -enc", "powershell -encodedcommand",
+        "diskpart", "reg delete", "reg add HKLM",
+        "icacls", "takeown", "bcdedit",
+        "mkfs.", "fdisk", "parted"
+    };
 
     public static void RegisterAll(
         McpServer server,

@@ -18,6 +18,7 @@ public class EmbeddedRelayFileServer : IAsyncDisposable
     private readonly ILogger _logger;
     private readonly string _storagePath;
     private readonly ConcurrentDictionary<string, WebSocket> _notificationClients = new();
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _notificationSendLocks = new();
 
     public EmbeddedRelayFileServer(RelayConfig config, ILogger logger)
     {
@@ -94,6 +95,7 @@ public class EmbeddedRelayFileServer : IAsyncDisposable
     public async Task HandleNotifications(string droneId, WebSocket ws, CancellationToken ct)
     {
         _notificationClients.TryAdd(droneId, ws);
+        _notificationSendLocks[droneId] = new SemaphoreSlim(1, 1);
         _logger.LogInformation("Share notifications: {DroneId} connected", droneId);
 
         var buffer = new byte[1024];
@@ -109,6 +111,8 @@ public class EmbeddedRelayFileServer : IAsyncDisposable
         finally
         {
             _notificationClients.TryRemove(droneId, out _);
+            if (_notificationSendLocks.TryRemove(droneId, out var sendLock))
+                sendLock.Dispose();
             if (ws.State == WebSocketState.Open || ws.State == WebSocketState.CloseReceived)
             {
                 try { await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Bye", CancellationToken.None); }
@@ -125,10 +129,12 @@ public class EmbeddedRelayFileServer : IAsyncDisposable
 
         foreach (var (id, ws) in _notificationClients)
         {
-            if (ws.State == WebSocketState.Open)
+            if (ws.State == WebSocketState.Open && _notificationSendLocks.TryGetValue(id, out var sendLock))
             {
+                if (!await sendLock.WaitAsync(TimeSpan.FromSeconds(5))) continue;
                 try { await ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None); }
                 catch { /* client gone */ }
+                finally { sendLock.Release(); }
             }
         }
     }
