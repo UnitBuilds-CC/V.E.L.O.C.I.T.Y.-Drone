@@ -220,8 +220,9 @@ public class RemoteConnector : IAsyncDisposable
     /// <summary>NMCP frame receive loop - reads binary frames, decodes NDA payloads.</summary>
     private async Task ReceiveLoop(CancellationToken ct)
     {
-        var buffer = new byte[4 * 1024 * 1024];
+        var buffer = new byte[256 * 1024];
         using var ms = new MemoryStream();
+        const long MaxMessageSize = 64 * 1024 * 1024;
 
         while (!ct.IsCancellationRequested && _ws?.State == WebSocketState.Open)
         {
@@ -234,7 +235,13 @@ public class RemoteConnector : IAsyncDisposable
                     result = await _ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
                     if (result.MessageType == WebSocketMessageType.Close) return;
                     ms.Write(buffer, 0, result.Count);
+                    if (ms.Length > MaxMessageSize)
+                    {
+                        _logger.LogWarning("Remote NMCP message exceeded {Max}MB limit — dropping", MaxMessageSize / 1024 / 1024);
+                        break;
+                    }
                 } while (!result.EndOfMessage);
+                if (ms.Length > MaxMessageSize) continue;
 
                 var data = ms.ToArray();
                 if (data.Length < NmcpFrame.HeaderSize || result.MessageType != WebSocketMessageType.Binary) continue;

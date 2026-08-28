@@ -17,6 +17,7 @@ public class RemoteBridge : IAsyncDisposable
     private readonly ILogger _logger;
     private readonly ConcurrentDictionary<string, WebSocket> _targets = new();
     private readonly ConcurrentDictionary<string, WebSocket> _controllers = new();
+    private readonly ConcurrentDictionary<WebSocket, SemaphoreSlim> _sendLocks = new();
     private CancellationTokenSource? _cts;
 
     public int TargetCount => _targets.Count;
@@ -30,7 +31,9 @@ public class RemoteBridge : IAsyncDisposable
 
     public async Task HandleConnection(string droneId, string role, string? target, WebSocket ws, CancellationToken ct)
     {
-        _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        using var connectionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var sendLock = new SemaphoreSlim(1, 1);
+        _sendLocks[ws] = sendLock;
 
         if (role == "target")
         {
@@ -46,13 +49,13 @@ public class RemoteBridge : IAsyncDisposable
         var buffer = new byte[65536]; // 64KB for screen frames
         try
         {
-            while (ws.State == WebSocketState.Open && !_cts.Token.IsCancellationRequested)
+            while (ws.State == WebSocketState.Open && !connectionCts.Token.IsCancellationRequested)
             {
-                var result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), _cts.Token);
+                var result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), connectionCts.Token);
 
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
-                    await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Bye", _cts.Token);
+                    await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Bye", connectionCts.Token);
                     break;
                 }
 
@@ -60,13 +63,11 @@ public class RemoteBridge : IAsyncDisposable
                 {
                     if (role == "controller" && !string.IsNullOrEmpty(target))
                     {
-                        // Forward from controller to target
-                        await ForwardToTarget(target, buffer, result.Count, result.MessageType, _cts.Token);
+                        await ForwardToTarget(target, buffer, result.Count, result.MessageType, connectionCts.Token);
                     }
                     else if (role == "target")
                     {
-                        // Forward from target to all controllers targeting this drone
-                        await ForwardToControllers(droneId, buffer, result.Count, result.MessageType, _cts.Token);
+                        await ForwardToControllers(droneId, buffer, result.Count, result.MessageType, connectionCts.Token);
                     }
                 }
             }
@@ -79,6 +80,9 @@ public class RemoteBridge : IAsyncDisposable
                 _targets.TryRemove(droneId, out _);
             else
                 _controllers.TryRemove(droneId, out _);
+
+            _sendLocks.TryRemove(ws, out _);
+            sendLock.Dispose();
 
             if (ws.State == WebSocketState.Open || ws.State == WebSocketState.CloseReceived)
             {
@@ -93,7 +97,12 @@ public class RemoteBridge : IAsyncDisposable
     {
         if (_targets.TryGetValue(targetId, out var targetWs) && targetWs.State == WebSocketState.Open)
         {
-            await targetWs.SendAsync(new ArraySegment<byte>(buffer, 0, count), msgType, true, ct);
+            if (_sendLocks.TryGetValue(targetWs, out var targetLock))
+            {
+                if (!await targetLock.WaitAsync(TimeSpan.FromSeconds(5), ct)) return;
+                try { await targetWs.SendAsync(new ArraySegment<byte>(buffer, 0, count), msgType, true, ct); }
+                finally { targetLock.Release(); }
+            }
         }
         else
         {
@@ -103,14 +112,15 @@ public class RemoteBridge : IAsyncDisposable
 
     private async Task ForwardToControllers(string targetId, byte[] buffer, int count, WebSocketMessageType msgType, CancellationToken ct)
     {
-        // Forward to all controllers (in a real implementation, we'd filter by which controller targets this drone)
         foreach (var (controllerId, ws) in _controllers)
         {
-            if (ws.State == WebSocketState.Open)
+            if (ws.State == WebSocketState.Open && _sendLocks.TryGetValue(ws, out var ctrlLock))
             {
                 try
                 {
-                    await ws.SendAsync(new ArraySegment<byte>(buffer, 0, count), msgType, true, ct);
+                    if (!await ctrlLock.WaitAsync(TimeSpan.FromSeconds(5), ct)) continue;
+                    try { await ws.SendAsync(new ArraySegment<byte>(buffer, 0, count), msgType, true, ct); }
+                    finally { ctrlLock.Release(); }
                 }
                 catch { /* controller disconnected */ }
             }

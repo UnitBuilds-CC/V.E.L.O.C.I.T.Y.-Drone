@@ -17,6 +17,8 @@ public class EmbeddedFileServer : IAsyncDisposable
     private HttpListener? _listener;
     private CancellationTokenSource? _cts;
 
+    private const long MaxUploadSize = 100L * 1024 * 1024;
+
     public EmbeddedFileServer(ILogger logger, string storagePath, string listenUrl, string apiKey)
     {
         _logger = logger;
@@ -141,13 +143,33 @@ public class EmbeddedFileServer : IAsyncDisposable
             return;
         }
 
+        if (ctx.Request.ContentLength64 > MaxUploadSize)
+        {
+            ctx.Response.StatusCode = 413;
+            await WriteJson(ctx, new { error = $"Upload exceeds maximum size of {MaxUploadSize} bytes" });
+            return;
+        }
+
         // Parse multipart form data
         string? remotePath = null;
         byte[]? fileData = null;
 
         var boundary = contentType.Split("boundary=")[1].Trim('"');
         using var ms = new MemoryStream();
-        await ctx.Request.InputStream.CopyToAsync(ms, ct);
+        var readBuffer = new byte[81920];
+        long totalRead = 0;
+        int bytesRead;
+        while ((bytesRead = await ctx.Request.InputStream.ReadAsync(readBuffer, ct)) > 0)
+        {
+            totalRead += bytesRead;
+            if (totalRead > MaxUploadSize)
+            {
+                ctx.Response.StatusCode = 413;
+                await WriteJson(ctx, new { error = $"Upload exceeds maximum size of {MaxUploadSize} bytes" });
+                return;
+            }
+            ms.Write(readBuffer, 0, bytesRead);
+        }
         var body = ms.ToArray();
         var bodyStr = global::System.Text.Encoding.UTF8.GetString(body);
         var parts = bodyStr.Split("--" + boundary);
@@ -282,13 +304,35 @@ public class EmbeddedFileServer : IAsyncDisposable
     private bool IsPathSafe(string relativePath)
     {
         if (string.IsNullOrWhiteSpace(relativePath)) return false;
+        if (relativePath.Contains('~') || relativePath.Contains('\0')) return false;
         try
         {
             var combined = Path.Combine(_storagePath, relativePath.Replace("/", Path.DirectorySeparatorChar.ToString()));
             var fullPath = Path.GetFullPath(combined);
             var storageRoot = Path.GetFullPath(_storagePath);
-            // Ensure the resolved path starts with the storage root
-            return fullPath.StartsWith(storageRoot, StringComparison.OrdinalIgnoreCase);
+            if (!fullPath.StartsWith(storageRoot, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            // Check each component for symlinks/reparse points
+            var current = storageRoot;
+            var relative = fullPath.Substring(storageRoot.Length).TrimStart(Path.DirectorySeparatorChar);
+            foreach (var part in relative.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
+            {
+                current = Path.Combine(current, part);
+                if (Directory.Exists(current))
+                {
+                    var info = new DirectoryInfo(current);
+                    if (info.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                        return false;
+                }
+                else if (File.Exists(current))
+                {
+                    var info = new FileInfo(current);
+                    if (info.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                        return false;
+                }
+            }
+            return true;
         }
         catch { return false; }
     }

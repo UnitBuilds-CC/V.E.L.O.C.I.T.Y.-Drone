@@ -336,12 +336,34 @@ public class EmbeddedRelayFileServer : IAsyncDisposable
     private bool IsPathSafe(string relativePath)
     {
         if (string.IsNullOrWhiteSpace(relativePath)) return false;
+        if (relativePath.Contains('~') || relativePath.Contains('\0')) return false;
         try
         {
             var combined = Path.Combine(_storagePath, relativePath.Replace("/", Path.DirectorySeparatorChar.ToString()));
             var fullPath = Path.GetFullPath(combined);
             var storageRoot = Path.GetFullPath(_storagePath);
-            return fullPath.StartsWith(storageRoot, StringComparison.OrdinalIgnoreCase);
+            if (!fullPath.StartsWith(storageRoot, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var current = storageRoot;
+            var relative = fullPath.Substring(storageRoot.Length).TrimStart(Path.DirectorySeparatorChar);
+            foreach (var part in relative.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
+            {
+                current = Path.Combine(current, part);
+                if (Directory.Exists(current))
+                {
+                    var info = new DirectoryInfo(current);
+                    if (info.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                        return false;
+                }
+                else if (File.Exists(current))
+                {
+                    var info = new FileInfo(current);
+                    if (info.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                        return false;
+                }
+            }
+            return true;
         }
         catch { return false; }
     }

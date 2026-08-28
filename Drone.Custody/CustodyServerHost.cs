@@ -136,6 +136,7 @@ public class CustodyServerHost : IAsyncDisposable
 
         _logger.LogInformation("Drone connected from {Addr}", clientAddr);
         var buffer = new byte[256 * 1024]; // 256KB buffer for custody batches
+        const long MaxMessageSize = 50 * 1024 * 1024; // 50MB max custody report
 
         try
         {
@@ -148,7 +149,14 @@ public class CustodyServerHost : IAsyncDisposable
                     result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), _cts.Token);
                     if (result.MessageType == WebSocketMessageType.Close) return;
                     ms.Write(buffer, 0, result.Count);
+                    if (ms.Length > MaxMessageSize)
+                    {
+                        _logger.LogWarning("Custody report from {Addr} exceeded {Max}MB limit — dropping", clientAddr, MaxMessageSize / 1024 / 1024);
+                        break;
+                    }
                 } while (!result.EndOfMessage);
+
+                if (ms.Length > MaxMessageSize) continue;
 
                 var data = ms.ToArray();
                 await ProcessCustodyReport(data, ws);
@@ -323,9 +331,6 @@ public class CustodyServerHost : IAsyncDisposable
             context.Response.StatusCode = 200;
             context.Response.ContentType = "application/json";
             context.Response.ContentLength64 = bytes.Length;
-            var queryOrigin = context.Request.Headers["Origin"];
-            if (!string.IsNullOrEmpty(queryOrigin))
-                context.Response.AddHeader("Access-Control-Allow-Origin", queryOrigin);
             context.Response.OutputStream.Write(bytes, 0, bytes.Length);
             context.Response.Close();
         }
@@ -352,9 +357,6 @@ public class CustodyServerHost : IAsyncDisposable
         context.Response.StatusCode = 200;
         context.Response.ContentType = "application/json";
         context.Response.ContentLength64 = bytes.Length;
-        var healthOrigin = context.Request.Headers["Origin"];
-        if (!string.IsNullOrEmpty(healthOrigin))
-            context.Response.AddHeader("Access-Control-Allow-Origin", healthOrigin);
         context.Response.OutputStream.Write(bytes, 0, bytes.Length);
         context.Response.Close();
     }

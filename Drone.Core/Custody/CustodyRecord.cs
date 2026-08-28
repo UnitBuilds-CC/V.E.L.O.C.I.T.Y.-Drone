@@ -99,7 +99,10 @@ public class CustodyRecord
     public bool VerifyHash()
     {
         if (string.IsNullOrEmpty(Hash)) return false;
-        return ComputeHash() == Hash;
+        var computed = ComputeHash();
+        return global::System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+            global::System.Text.Encoding.UTF8.GetBytes(computed),
+            global::System.Text.Encoding.UTF8.GetBytes(Hash));
     }
 
     /// <summary>
@@ -116,7 +119,9 @@ public class CustodyRecord
             return string.IsNullOrEmpty(PrevHash);
 
         // This record's PrevHash must match the previous record's Hash
-        return PrevHash == previousRecord.Hash;
+        return global::System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+            global::System.Text.Encoding.UTF8.GetBytes(PrevHash),
+            global::System.Text.Encoding.UTF8.GetBytes(previousRecord.Hash));
     }
 
     /// <summary>

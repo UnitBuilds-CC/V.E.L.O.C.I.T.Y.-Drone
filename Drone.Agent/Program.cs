@@ -388,24 +388,44 @@ public class Program
                                 }
                                 else
                                 {
-                                    // Verify SHA-256 checksum of new binary before applying
-                                    using var sha256 = global::System.Security.Cryptography.SHA256.Create();
-                                    var hashBytes = sha256.ComputeHash(global::System.IO.File.ReadAllBytes(newBinaryPath));
-                                    var checksum = Convert.ToHexString(hashBytes)[..16];
-                                    logger.LogInformation("Update binary checksum: {Checksum} ({Size} bytes)", checksum, new global::System.IO.FileInfo(newBinaryPath).Length);
-
-                                    var script = $"@echo off\r\necho Waiting for drone to stop...\r\n:wait\r\ntasklist /fi \"imagename eq velocity-drone.exe\" 2>NUL | find /I /N \"velocity-drone.exe\" >NUL\r\nif %errorlevel%==0 (timeout /t 1 /nobreak >NUL & goto wait)\r\ntimeout /t 2 /nobreak >NUL\r\ncopy /Y \"{newBinaryPath}\" \"{targetBinaryPath}\" >NUL\r\ndel \"{newBinaryPath}\" >NUL\r\ncd /d {droneBaseDir}\r\nstart \"\" run-drone.bat\r\necho Update complete!\r\ntimeout /t 3 /nobreak >NUL";
-                                    global::System.IO.File.WriteAllText(scriptPath, script);
-                                    response = $"Starting self-update (checksum: {checksum})...";
-                                    await messenger.SendMessageAsync(from, response);
-                                    global::System.Diagnostics.Process.Start(new global::System.Diagnostics.ProcessStartInfo
+                                    // Verify SHA-256 checksum against sidecar file
+                                    var checksumPath = newBinaryPath + ".sha256";
+                                    if (!global::System.IO.File.Exists(checksumPath))
                                     {
-                                        FileName = scriptPath,
-                                        UseShellExecute = true,
-                                        CreateNoWindow = false
-                                    });
-                                    _ = Task.Run(async () => { await Task.Delay(1000); masterCts?.Cancel(); });
-                                    return;
+                                        response = "Update failed: no checksum file found (.sha256 sidecar required)";
+                                        logger.LogWarning("Update rejected: {Path}", response);
+                                    }
+                                    else
+                                    {
+                                        using var sha256 = global::System.Security.Cryptography.SHA256.Create();
+                                        var hashBytes = sha256.ComputeHash(global::System.IO.File.ReadAllBytes(newBinaryPath));
+                                        var actualHash = Convert.ToHexString(hashBytes);
+                                        var expectedHash = global::System.IO.File.ReadAllText(checksumPath).Trim().ToUpperInvariant();
+
+                                        if (!string.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase))
+                                        {
+                                            response = $"Update failed: checksum mismatch (expected {expectedHash[..16]}..., got {actualHash[..16]}...)";
+                                            logger.LogWarning("Update rejected: checksum mismatch");
+                                        }
+                                        else
+                                        {
+                                            var checksum = actualHash[..16];
+                                            logger.LogInformation("Update binary checksum verified: {Checksum} ({Size} bytes)", checksum, new global::System.IO.FileInfo(newBinaryPath).Length);
+
+                                            var script = $"@echo off\r\necho Waiting for drone to stop...\r\n:wait\r\ntasklist /fi \"imagename eq velocity-drone.exe\" 2>NUL | find /I /N \"velocity-drone.exe\" >NUL\r\nif %errorlevel%==0 (timeout /t 1 /nobreak >NUL & goto wait)\r\ntimeout /t 2 /nobreak >NUL\r\ncopy /Y \"{newBinaryPath}\" \"{targetBinaryPath}\" >NUL\r\ndel \"{newBinaryPath}\" >NUL\r\ncd /d {droneBaseDir}\r\nstart \"\" run-drone.bat\r\necho Update complete!\r\ntimeout /t 3 /nobreak >NUL";
+                                            global::System.IO.File.WriteAllText(scriptPath, script);
+                                            response = $"Starting self-update (checksum: {checksum})...";
+                                            await messenger.SendMessageAsync(from, response);
+                                            global::System.Diagnostics.Process.Start(new global::System.Diagnostics.ProcessStartInfo
+                                            {
+                                                FileName = scriptPath,
+                                                UseShellExecute = true,
+                                                CreateNoWindow = false
+                                            });
+                                            _ = Task.Run(async () => { await Task.Delay(1000); masterCts?.Cancel(); });
+                                            return;
+                                        }
+                                    }
                                 }
                             }
                             else if (cmd.Equals("benchmark", StringComparison.OrdinalIgnoreCase))
@@ -441,9 +461,11 @@ public class Program
                                 var command = cmd.Substring(4);
                                 // Input validation: reject commands with shell metacharacters that could be used for injection
                                 if (command.Contains('|') || command.Contains('&') || command.Contains(';') ||
-                                    command.Contains('`') || command.Contains('$') || command.Contains('(') || command.Contains(')'))
+                                    command.Contains('`') || command.Contains('$') || command.Contains('(') || command.Contains(')') ||
+                                    command.Contains('>') || command.Contains('<') || command.Contains('^') ||
+                                    command.Contains('%') || command.Contains('!') || command.Contains('\n') || command.Contains('\r'))
                                 {
-                                    response = "Error: command contains disallowed characters (| & ; ` $ ( ))";
+                                    response = "Error: command contains disallowed characters (| & ; ` $ ( ) > < ^ % ! newlines)";
                                 }
                                 else
                                 {

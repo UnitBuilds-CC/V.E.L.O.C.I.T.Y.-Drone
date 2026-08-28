@@ -147,6 +147,7 @@ public class MessengerConnector : IAsyncDisposable
     {
         var buffer = new byte[64 * 1024];
         using var ms = new MemoryStream();
+        const long MaxMessageSize = 10 * 1024 * 1024;
         while (!ct.IsCancellationRequested && _ws?.State == WebSocketState.Open)
         {
             ms.SetLength(0);
@@ -156,7 +157,13 @@ public class MessengerConnector : IAsyncDisposable
                 result = await _ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
                 if (result.MessageType == WebSocketMessageType.Close) return;
                 ms.Write(buffer, 0, result.Count);
+                if (ms.Length > MaxMessageSize)
+                {
+                    _logger.LogWarning("Messenger message exceeded {Max}MB limit — dropping", MaxMessageSize / 1024 / 1024);
+                    break;
+                }
             } while (!result.EndOfMessage);
+            if (ms.Length > MaxMessageSize) continue;
             var json = Encoding.UTF8.GetString(ms.ToArray());
             if (string.IsNullOrWhiteSpace(json)) continue;
             _logger.LogInformation("[Messenger] Received frame: {Len} bytes", json.Length);

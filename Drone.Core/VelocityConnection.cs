@@ -277,12 +277,12 @@ public class VelocityConnection : IAsyncDisposable
     {
         var buffer = new byte[64 * 1024];
         using var ms = new MemoryStream();
+        const long MaxMessageSize = 10 * 1024 * 1024;
 
         while (!ct.IsCancellationRequested && _ws?.State == WebSocketState.Open)
         {
             try
             {
-                // Handle message fragmentation: accumulate chunks until EndOfMessage
                 ms.SetLength(0);
                 WebSocketReceiveResult result;
                 do
@@ -294,7 +294,14 @@ public class VelocityConnection : IAsyncDisposable
                         return;
                     }
                     ms.Write(buffer, 0, result.Count);
+                    if (ms.Length > MaxMessageSize)
+                    {
+                        _logger.LogWarning("WebSocket message exceeded {Max}MB limit — dropping", MaxMessageSize / 1024 / 1024);
+                        break;
+                    }
                 } while (!result.EndOfMessage);
+
+                if (ms.Length > MaxMessageSize) continue;
 
                 var json = Encoding.UTF8.GetString(ms.ToArray());
                 using var doc = JsonDocument.Parse(json);
