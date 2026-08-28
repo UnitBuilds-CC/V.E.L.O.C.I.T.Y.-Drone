@@ -23,5 +23,6 @@
     <ProjectReference Include="..\..\Drone.Services\Drone.Services.csproj" />
     <ProjectReference Include="..\..\Drone.Autonomy\Drone.Autonomy.csproj" />
     <ProjectReference Include="..\..\Drone.Custody\Drone.Custody.csproj" />
+    <ProjectReference Include="..\..\Drone.Native\Drone.Native.csproj" />
   </ItemGroup>
 </Project>
