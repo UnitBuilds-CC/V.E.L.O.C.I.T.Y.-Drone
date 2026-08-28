@@ -60,5 +60,5 @@ jobs:
           key: ${{ secrets.VM_SSH_KEY }}
           script: |
             cd /opt/velocity
-            docker compose pull drone || true
+            docker compose pull drone
             docker compose up -d drone || echo "Drone service not yet in compose"

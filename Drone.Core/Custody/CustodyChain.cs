@@ -124,7 +124,9 @@ public class CustodyChain
 
         // Compute the root from the records' hashes
         var computedRoot = ComputeBatchMerkleRoot(recordList);
-        return computedRoot == expectedRoot;
+        return global::System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+            global::System.Text.Encoding.UTF8.GetBytes(computedRoot),
+            global::System.Text.Encoding.UTF8.GetBytes(expectedRoot));
     }
 
     /// <summary>
