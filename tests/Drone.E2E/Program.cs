@@ -14,6 +14,7 @@ public class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        Environment.SetEnvironmentVariable("DRONE_ALLOW_INSECURE_HTTP", "1");
         Console.WriteLine("=== Velocity Drone E2E Tests ===");
         var passed = 0;
         var failed = 0;

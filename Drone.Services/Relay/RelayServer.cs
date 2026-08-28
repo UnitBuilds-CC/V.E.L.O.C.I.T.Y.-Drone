@@ -142,7 +142,7 @@ public class RelayServer : IAsyncDisposable
                 if (!AuthenticateRequest(ctx))
                 {
                     ctx.Response.StatusCode = 401;
-                    await WriteJson(ctx, new { error = "Unauthorized. Provide ?apikey=X or X-Api-Key header." });
+                    await WriteJson(ctx, new { error = "Unauthorized. Provide X-Api-Key header." });
                     return;
                 }
 
@@ -210,15 +210,10 @@ public class RelayServer : IAsyncDisposable
 
     private bool AuthenticateRequest(HttpListenerContext ctx)
     {
-        if (string.IsNullOrEmpty(_config.ApiKey)) return true; // No auth configured
+        if (string.IsNullOrEmpty(_config.ApiKey)) return true;
 
-        // Check header first (preferred — not leaked in URLs/logs)
         var headerKey = ctx.Request.Headers["X-Api-Key"];
         if (!string.IsNullOrEmpty(headerKey) && SecureCompare(headerKey, _config.ApiKey)) return true;
-
-        // Check query string (less secure — key appears in URLs/logs)
-        var queryKey = ctx.Request.QueryString["apikey"];
-        if (!string.IsNullOrEmpty(queryKey) && SecureCompare(queryKey, _config.ApiKey)) return true;
 
         return false;
     }

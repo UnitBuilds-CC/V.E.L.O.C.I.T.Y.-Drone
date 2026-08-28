@@ -26,7 +26,8 @@ public class ShareConnector : IAsyncDisposable
         _logger = logger;
         _http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
         if (!string.IsNullOrEmpty(config.ServerUrl)) _http.BaseAddress = new Uri(config.ServerUrl);
-        _http.DefaultRequestHeaders.Add("X-Api-Key", config.AdminApiKey ?? "");
+        if (!string.IsNullOrEmpty(config.AdminApiKey))
+            _http.DefaultRequestHeaders.Add("X-Api-Key", config.AdminApiKey);
     }
 
     public async Task ConnectNotificationsAsync(string wsUrl, CancellationToken ct = default)

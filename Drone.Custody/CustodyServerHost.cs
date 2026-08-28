@@ -323,7 +323,9 @@ public class CustodyServerHost : IAsyncDisposable
             context.Response.StatusCode = 200;
             context.Response.ContentType = "application/json";
             context.Response.ContentLength64 = bytes.Length;
-            context.Response.AddHeader("Access-Control-Allow-Origin", "*");
+            var queryOrigin = context.Request.Headers["Origin"];
+            if (!string.IsNullOrEmpty(queryOrigin))
+                context.Response.AddHeader("Access-Control-Allow-Origin", queryOrigin);
             context.Response.OutputStream.Write(bytes, 0, bytes.Length);
             context.Response.Close();
         }
@@ -350,7 +352,9 @@ public class CustodyServerHost : IAsyncDisposable
         context.Response.StatusCode = 200;
         context.Response.ContentType = "application/json";
         context.Response.ContentLength64 = bytes.Length;
-        context.Response.AddHeader("Access-Control-Allow-Origin", "*");
+        var healthOrigin = context.Request.Headers["Origin"];
+        if (!string.IsNullOrEmpty(healthOrigin))
+            context.Response.AddHeader("Access-Control-Allow-Origin", healthOrigin);
         context.Response.OutputStream.Write(bytes, 0, bytes.Length);
         context.Response.Close();
     }

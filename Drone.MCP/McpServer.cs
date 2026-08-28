@@ -238,7 +238,13 @@ public class McpServer : IAsyncDisposable
 
         if (!isTls)
         {
-            _logger.LogWarning("MCP server running WITHOUT TLS. Ensure TLS is terminated at reverse proxy (nginx/caddy/ingress) in production.");
+            var allowInsecure = Environment.GetEnvironmentVariable("DRONE_ALLOW_INSECURE_HTTP");
+            if (string.IsNullOrEmpty(allowInsecure))
+            {
+                _logger.LogError("MCP server refusing to start without TLS. Set DRONE_ALLOW_INSECURE_HTTP=1 to explicitly allow insecure HTTP, or use https:// URL.");
+                throw new InvalidOperationException("MCP WebSocket requires TLS (https://) unless DRONE_ALLOW_INSECURE_HTTP=1 is set");
+            }
+            _logger.LogWarning("MCP server running WITHOUT TLS (DRONE_ALLOW_INSECURE_HTTP=1). Ensure TLS is terminated at reverse proxy in production.");
         }
 
         _wsListener = new HttpListener();

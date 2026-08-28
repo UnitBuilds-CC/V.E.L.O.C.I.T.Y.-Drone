@@ -61,7 +61,7 @@ EXPOSE 9100
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:9100/health/live || exit 1
+    CMD wget -q --spider http://localhost:9100/health/live || exit 1
 
 # Run as non-root
 USER drone
@@ -69,5 +69,6 @@ USER drone
 # Default to headless mode in Docker
 ENV DRONE_MODE=headless
 ENV DRONE_MCP_URL=http://0.0.0.0:9100
+ENV DRONE_ALLOW_INSECURE_HTTP=1
 
 ENTRYPOINT ["dotnet", "velocity-drone.dll"]

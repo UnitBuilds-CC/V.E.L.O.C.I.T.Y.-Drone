@@ -261,7 +261,7 @@ public class RelayConfig
     /// <summary>Path to PFX certificate file for TLS. If set, relay also listens on HTTPS.</summary>
     public string? TlsCertificatePath { get; set; }
 
-    /// <summary>Password for the PFX certificate file.</summary>
+    /// <summary>Password for the PFX certificate file. Should be set via DRONE_RELAY_TLS_PASS environment variable, not persisted in config.</summary>
     public string? TlsCertificatePassword { get; set; }
 
     /// <summary>WebSocket URL of the relay server (for client role).</summary>

@@ -193,7 +193,7 @@ public class Program
             // --- Custody trail initialization ---
             var custodyLogPath = Environment.GetEnvironmentVariable("DRONE_CUSTODY_PATH")
                 ?? Path.Combine(AppContext.BaseDirectory, "custody", "drone-custody.jsonl");
-            custodyLogger = new CustodyAuditLogger(droneConfig.DroneId, custodyLogPath);
+            custodyLogger = new CustodyAuditLogger(droneConfig.DroneId, custodyLogPath, logger: logger);
             custodyLogger.LoadPersistedRecords(); // Resume chain from disk
             logger.LogInformation("Custody trail initialized (path: {Path})", custodyLogPath);
 
@@ -558,8 +558,7 @@ public class Program
                 logger.LogWarning("Generating temporary MCP token for this session — check DRONE_MCP_TOKEN env var on stdout.");
                 var tempToken = Convert.ToHexString(global::System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
                 mcpServer.SetAuthToken(tempToken);
-                // SECURITY: Write token to stdout only (not to structured logs) so it can be captured securely
-                Console.WriteLine($"DRONE_TEMP_MCP_TOKEN={tempToken}");
+                Console.Error.WriteLine($"DRONE_TEMP_MCP_TOKEN={tempToken}");
             }
             else
             {
@@ -706,7 +705,7 @@ public class Program
                         await messenger.DisposeAsync();
 
                     // Flush custody trail (writes pending batch with Merkle root)
-                    custodyLogger?.Dispose();
+                    if (custodyLogger != null) await custodyLogger.DisposeAsync();
 
                     logger.LogInformation("All resources disposed.");
                 });

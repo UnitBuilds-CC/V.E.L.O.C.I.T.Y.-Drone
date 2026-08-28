@@ -8,7 +8,7 @@ Autonomous agent for remote system management. Runs as a background tray agent o
 # Build
 dotnet build VelocityDrone.slnx /p:SkipRust=true
 
-# Test (52 unit tests + 10 E2E)
+# Test (100 unit tests + 10 E2E)
 dotnet test tests/Drone.Tests/Drone.Tests.csproj
 dotnet run --project tests/Drone.E2E/Drone.E2E.csproj
 

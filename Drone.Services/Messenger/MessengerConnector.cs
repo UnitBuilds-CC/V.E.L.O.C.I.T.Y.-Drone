@@ -50,12 +50,9 @@ public class MessengerConnector : IAsyncDisposable
             try
             {
                 _ws = new ClientWebSocket();
-                // Build WebSocket URL with required query parameters (username, device_id, secret for auth)
                 var separator = _config.ServerUrl.Contains("?") ? "&" : "?";
                 var username = _droneId;
                 var connectUrl = $"{_config.ServerUrl}{separator}username={Uri.EscapeDataString(username)}&device_id=drone";
-                if (!string.IsNullOrEmpty(_config.ConnectionSecret))
-                    connectUrl += $"&secret={Uri.EscapeDataString(_config.ConnectionSecret)}";
                 await _ws.ConnectAsync(new Uri(connectUrl), _cts.Token);
                 var auth = JsonSerializer.Serialize(new { type = "auth", username, secret = _config.ConnectionSecret });
                 await SafeSendAsync(Encoding.UTF8.GetBytes(auth), _cts.Token);

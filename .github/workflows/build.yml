@@ -31,6 +31,9 @@ jobs:
       - name: Test
         run: dotnet test tests/Drone.Tests/Drone.Tests.csproj --no-build -c Release --verbosity normal
 
+      - name: E2E Tests
+        run: dotnet run --project tests/Drone.E2E/Drone.E2E.csproj -c Release
+
   docker:
     needs: build
     runs-on: ubuntu-latest

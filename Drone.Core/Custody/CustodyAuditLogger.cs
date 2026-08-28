@@ -9,12 +9,13 @@ namespace Drone.Core.Custody;
 /// in-memory ring buffer for streaming to the CustodyServer.
 /// Supports Merkle batch roots for O(log N) verification.
 /// </summary>
-public class CustodyAuditLogger : IDisposable
+public class CustodyAuditLogger : IDisposable, IAsyncDisposable
 {
     private readonly CustodyChain _chain;
     private readonly CorrelationTracker _correlations;
     private readonly string _logPath;
     private readonly long _maxFileSizeBytes;
+    private readonly ILogger? _logger;
     private StreamWriter? _writer;
     private string _currentFilePath = "";
     private DateTime _currentDate;
@@ -48,13 +49,14 @@ public class CustodyAuditLogger : IDisposable
     /// <param name="logPath">Path for local JSON-lines log file. Null to disable local logging.</param>
     /// <param name="maxFileSizeMb">Max file size before rotation (default 50MB).</param>
     /// <param name="ringBufferSize">Number of recent records to keep in memory for streaming.</param>
-    public CustodyAuditLogger(string droneId, string? logPath = null, long maxFileSizeMb = 50, int ringBufferSize = DefaultRingBufferSize)
+    public CustodyAuditLogger(string droneId, string? logPath = null, long maxFileSizeMb = 50, int ringBufferSize = DefaultRingBufferSize, ILogger? logger = null)
     {
         _chain = new CustodyChain(droneId);
         _correlations = new CorrelationTracker();
         _logPath = logPath ?? "";
         _maxFileSizeBytes = maxFileSizeMb * 1024 * 1024;
         _ringBuffer = new CustodyRecord[ringBufferSize];
+        _logger = logger;
 
         if (!string.IsNullOrEmpty(_logPath))
             EnsureWriter();
@@ -233,7 +235,7 @@ public class CustodyAuditLogger : IDisposable
                 }
                 _writer?.Flush();
             }
-            catch { /* custody write failure must not crash the agent */ }
+            catch (Exception ex) { _logger?.LogWarning("Custody audit write failed: {Error}", ex.Message); }
         }
     }
 
@@ -275,7 +277,7 @@ public class CustodyAuditLogger : IDisposable
                 CleanupOldRotations();
             }
         }
-        catch { /* rotation failure is non-fatal */ }
+        catch (Exception ex) { _logger?.LogWarning("Custody log rotation failed: {Error}", ex.Message); }
     }
 
     private string GetFilePath(DateTime date)
@@ -349,14 +351,23 @@ public class CustodyAuditLogger : IDisposable
         if (_disposed) return;
         _disposed = true;
 
-        // Flush any remaining pending batch
         FlushBatchWithMerkleRoot();
 
         lock (_lock)
         {
-            _writer?.Dispose();
-            _writer = null;
+            if (_writer != null)
+            {
+                try { _writer.Flush(); } catch (Exception ex) { _logger?.LogWarning("Custody flush on dispose failed: {Error}", ex.Message); }
+                _writer.Dispose();
+                _writer = null;
+            }
         }
         GC.SuppressFinalize(this);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        Dispose();
+        await Task.CompletedTask;
     }
 }
