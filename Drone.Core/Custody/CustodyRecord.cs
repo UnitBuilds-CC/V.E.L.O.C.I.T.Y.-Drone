@@ -78,9 +78,30 @@ public class CustodyRecord
     /// </summary>
     public string ComputeHash()
     {
-        var content = $"{DroneId}|{EventId}|{Sequence}|{Timestamp:O}|{EventType}|{TargetSystem}|{Action}|{Arguments}|{Result}|{Success}|{CorrelationId}";
-        var bytes = global::System.Text.Encoding.UTF8.GetBytes(content);
-        var hash = SHA256.HashData(bytes);
+        using var ms = new global::System.IO.MemoryStream();
+        using var writer = new global::System.IO.BinaryWriter(ms);
+
+        void WriteField(string? value)
+        {
+            var bytes = value != null ? global::System.Text.Encoding.UTF8.GetBytes(value) : global::System.Array.Empty<byte>();
+            writer.Write(bytes.Length);
+            if (bytes.Length > 0) writer.Write(bytes);
+        }
+
+        WriteField(DroneId);
+        WriteField(EventId);
+        writer.Write(Sequence);
+        writer.Write(Timestamp.Ticks);
+        WriteField(EventType);
+        WriteField(TargetSystem);
+        WriteField(Action);
+        WriteField(Arguments);
+        WriteField(Result);
+        writer.Write(Success);
+        WriteField(CorrelationId);
+
+        writer.Flush();
+        var hash = SHA256.HashData(ms.ToArray());
         return Convert.ToHexString(hash);
     }
 

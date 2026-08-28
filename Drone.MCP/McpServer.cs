@@ -151,7 +151,8 @@ public class McpServer : IAsyncDisposable
 
                 if (reqState == StateReqReady)
                 {
-                    // Transition to PROCESSING (single-client shmem, safe without CAS)
+                    // TOCTOU guard: re-verify state before transitioning to PROCESSING
+                    if (view.ReadByte(ReqStateOffset) != StateReqReady) continue;
                     view.Write(ReqStateOffset, StateProcessing);
                     try
                     {

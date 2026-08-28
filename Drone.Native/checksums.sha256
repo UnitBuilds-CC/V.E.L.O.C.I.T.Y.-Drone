@@ -1,0 +1,14 @@
+# SHA-256 checksums for pre-built native DLLs
+# Verify with: sha256sum -c checksums.sha256
+#
+# These DLLs are pre-built binaries committed to the repository.
+# To verify integrity after clone:
+#   cd Drone.Native && sha256sum -c checksums.sha256
+#
+# To rebuild from source and update checksums:
+#   cd Drone.Native && cargo build --release
+#   cp target/release/velocity_delta.dll .
+#   sha256sum velocity_delta.dll velocity_v2_ffi.dll > checksums.sha256
+
+475c906a248398cfd5c7acb87315fa54842a5a684d02b98a188cfb20676759c6  velocity_delta.dll
+8cdb96279aa9f7d5a0f749b641b336be99335242432113a76f4d20200f7a4b4b  velocity_v2_ffi.dll

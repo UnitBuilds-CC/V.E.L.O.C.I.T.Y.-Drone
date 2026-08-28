@@ -184,6 +184,10 @@ public class VelocityConnection : IAsyncDisposable
         if (payload.Length > 0)
             _view.WriteArray(ReqPayloadOffset, payload, 0, payload.Length);
 
+        // TOCTOU guard: re-verify state hasn't changed since we checked it
+        if (_view.ReadByte(ReqStateOffset) != StateIdle)
+            return; // Another writer got in — abort, caller will retry
+
         // Signal REQ_READY
         _view.Write(ReqStateOffset, StateReqReady);
     }
