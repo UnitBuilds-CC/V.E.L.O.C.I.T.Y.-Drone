@@ -39,8 +39,23 @@ public class Program
 
 internal class ConsoleLogger : Drone.Core.ILogger
 {
-    public void LogInformation(string message, params object[] args) => Console.WriteLine("[INFO] " + message, args);
-    public void LogWarning(string message, params object[] args) => Console.WriteLine("[WARN] " + message, args);
-    public void LogError(string message, params object[] args) => Console.WriteLine("[ERROR] " + message, args);
-    public void LogDebug(string message, params object[] args) => Console.WriteLine("[DBG]  " + message, args);
+    private static string Format(string message, object[] args)
+    {
+        if (args == null || args.Length == 0) return message;
+        var result = message;
+        for (int i = 0; i < args.Length; i++)
+        {
+            // Replace first {Xxx} placeholder with arg value (Serilog-style)
+            var idx = result.IndexOf('{');
+            if (idx < 0) break;
+            var end = result.IndexOf('}', idx);
+            if (end < 0) break;
+            result = result.Substring(0, idx) + args[i]?.ToString() + result.Substring(end + 1);
+        }
+        return result;
+    }
+    public void LogInformation(string message, params object[] args) => Console.WriteLine("[INFO] " + Format(message, args));
+    public void LogWarning(string message, params object[] args) => Console.WriteLine("[WARN] " + Format(message, args));
+    public void LogError(string message, params object[] args) => Console.WriteLine("[ERROR] " + Format(message, args));
+    public void LogDebug(string message, params object[] args) => Console.WriteLine("[DBG]  " + Format(message, args));
 }
